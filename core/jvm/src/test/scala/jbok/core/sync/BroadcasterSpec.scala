@@ -30,7 +30,7 @@ class BroadcasterSpec extends JbokSpec {
         x <- pms.tail.traverse(_.pm.subscribe.take(1).compile.toList)
         _ = x.flatten.length shouldBe pms.length - 1
         _ <- stopAll
-      } yield ()
+      }  ()
 
       p.unsafeRunSync()
     }

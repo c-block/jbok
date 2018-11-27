@@ -97,7 +97,7 @@ object Clique {
   val diffInTurn  = BigInt(2) // Block difficulty for in-turn signatures
   val diffNoTurn  = BigInt(1) // Block difficulty for out-of-turn signatures
 
-  val checkpointInterval = 1024 // Number of blocks after which to save the vote snapshot to the database
+  val checkpointInterval = 1024 // Number of blocks after which to save the vote snapshot to the databsase
   val inMemorySnapshots  = 128  // Number of recent vote snapshots to keep in memory
   val inMemorySignatures = 1024 // Number of recent blocks to keep in memory
 
