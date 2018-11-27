@@ -1,14 +1,13 @@
 package jbok.network.rpc
 
 import _root_.io.circe._
-import _root_.io.circe.generic.auto._
 import _root_.io.circe.parser._
 import _root_.io.circe.syntax._
 import cats.effect.{Concurrent, IO}
 import fs2._
 import fs2.concurrent.Queue
 import jbok.network.common.{RequestId, RequestMethod}
-import jbok.network.json.{JsonRPCNotification, JsonRPCResponse}
+import jbok.network.json._
 import jbok.network.rpc.RpcServer._
 import scodec.Codec
 
@@ -18,14 +17,14 @@ class RpcServer(
     val handlers: Map[String, String => IO[String]],
     val queue: Queue[IO, String]
 )(implicit F: Concurrent[IO]) {
-  private[this] val log = org.log4s.getLogger
+  private[this] val log = org.log4s.getLogger("RpcServer")
 
   def mountAPI[API](api: API): RpcServer = macro RpcServerMacro.mountAPI[RpcServer, API]
 
   def addHandlers(handlers: List[(String, String => IO[String])]): RpcServer =
     new RpcServer(this.handlers ++ handlers.toMap, queue)
 
-  def handle(req: String): IO[String] = {
+  def handle(req: String): IO[String] =
     requestMethod.method(req) match {
       case Some(m) =>
         log.debug(s"handling request ${req}")
@@ -34,7 +33,7 @@ class RpcServer(
             f(req).attempt.map {
               case Left(e) =>
                 log.debug(s"internal error: ${e.toString}")
-                JsonRPCResponse.internalError(e.toString).asJson.noSpaces
+                JsonRpcErrors.internalError.asJson.noSpaces
 
               case Right(resp) =>
                 log.debug(s"response: ${resp}")
@@ -42,12 +41,11 @@ class RpcServer(
             }
           case None =>
             log.debug(s"method not found: ${m}")
-            IO.pure(JsonRPCResponse.methodNotFound(m, RequestId[String].id(req)).asJson.noSpaces)
+            IO.pure(JsonRpcErrorResponse(RequestId[String].id(req), JsonRpcErrors.methodNotFound).asJson.noSpaces)
         }
       case None =>
-        IO.pure(JsonRPCResponse.invalidRequest("no method specified").asJson.noSpaces)
+        IO.pure(JsonRpcErrors.invalidRequest.asJson.noSpaces)
     }
-  }
 
   val pipe: Pipe[IO, String, String] = { input =>
     val handles = input.evalMap(handle)
@@ -55,15 +53,15 @@ class RpcServer(
   }
 
   def notify[A: Encoder](method: String, a: A): IO[Unit] = {
-    val notification: String = JsonRPCNotification(method, a).asJson.noSpaces
+    val notification: String = JsonRpcNotification(method, a).asJson.noSpaces
     queue.enqueue1(notification)
   }
 }
 
 object RpcServer {
   implicit val requestId: RequestId[String] = new RequestId[String] {
-    override def id(a: String): Option[String] =
-      parse(a).flatMap(_.hcursor.downField("id").as[String]).toOption
+    override def id(a: String): String =
+      parse(a).flatMap(_.hcursor.downField("id").as[String]).toOption.getOrElse("")
   }
 
   implicit val requestMethod: RequestMethod[String] = new RequestMethod[String] {

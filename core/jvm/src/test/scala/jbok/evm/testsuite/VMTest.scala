@@ -3,18 +3,19 @@ package jbok.evm.testsuite
 import better.files._
 import cats.effect.IO
 import io.circe._
+import io.circe.generic.auto._
 import io.circe.parser._
+import jbok.JbokSpec
 import jbok.codec.json.implicits._
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.implicits._
-import jbok.core.History
+import jbok.core.ledger.History
 import jbok.core.models.{Account, Address, BlockHeader, UInt256}
 import jbok.core.store.namespaces
 import jbok.crypto._
 import jbok.crypto.authds.mpt.MerklePatriciaTrie
 import jbok.evm._
-import jbok.persistent.{KeyValueDB, SnapshotKeyValueDB}
-import org.scalatest.{Matchers, WordSpec}
+import jbok.persistent.{KeyValueDB, StageKeyValueDB}
 import scodec.bits.ByteVector
 
 import scala.collection.JavaConverters._
@@ -91,7 +92,7 @@ case class CallCreateJson(data: ByteVector, destination: ByteVector, gasLimit: B
 
 case class InfoJson(comment: String, filledwith: String, lllcversion: String, source: String, sourceHash: String)
 
-class VMTest extends WordSpec with Matchers {
+class VMTest extends JbokSpec {
   def loadMockWorldState(json: Map[Address, PrePostJson], currentNumber: BigInt): WorldState[IO] = {
     val accounts = json.map {
       case (addr, account) => (addr, Account(balance = UInt256(account.balance), nonce = UInt256(account.nonce)))
@@ -110,7 +111,7 @@ class VMTest extends WordSpec with Matchers {
     }
 
     val mpt          = MerklePatriciaTrie[IO](namespaces.Node, db).unsafeRunSync()
-    val accountProxy = SnapshotKeyValueDB[IO, Address, Account](namespaces.empty, mpt) ++ accounts
+    val accountProxy = StageKeyValueDB[IO, Address, Account](namespaces.empty, mpt) ++ accounts
 
     WorldState[IO](
       history,
@@ -125,7 +126,7 @@ class VMTest extends WordSpec with Matchers {
   }
 
   def check(label: String, vmJson: VMJson) =
-    s"test pass test suite ${label}" in {
+    s"pass test suite ${label}" in {
       val config    = EvmConfig.HomesteadConfigBuilder(None)
       val preState  = loadMockWorldState(vmJson.pre, vmJson.env.currentNumber)
       val postState = loadMockWorldState(vmJson.post, vmJson.env.currentNumber)

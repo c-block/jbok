@@ -2,15 +2,15 @@ package jbok.core.validators
 
 import cats.effect.IO
 import jbok.JbokSpec
+import jbok.core.Fixtures
 import jbok.core.config.Configs.BlockChainConfig
 import jbok.core.models._
 import jbok.core.validators.TransactionInvalid._
-import jbok.core.{Fixtures, HistoryFixture}
 import jbok.crypto.signature.ecdsa.SecP256k1
-import jbok.testkit.Gens
+import jbok.common.testkit._
 import scodec.bits._
 
-class TransactionValidatorFixture extends HistoryFixture {
+class TransactionValidatorFixture {
   val keyPair = SecP256k1.generateKeyPair().unsafeRunSync()
   val txBeforeHomestead = Transaction(
     nonce = 81,
@@ -64,7 +64,7 @@ class TransactionValidatorFixture extends HistoryFixture {
   val transactionValidator = new TransactionValidator[IO](BlockChainConfig())
 }
 
-class TransactionValidatorSpec extends JbokSpec with Gens {
+class TransactionValidatorSpec extends JbokSpec {
   "TxValidator" should {
     "report as valid a tx from before homestead" in new TransactionValidatorFixture {
       transactionValidator
@@ -261,7 +261,7 @@ class TransactionValidatorSpec extends JbokSpec with Gens {
     }
 
     "report as invalid a tx with upfront cost higher than the sender's balance" in new TransactionValidatorFixture {
-      forAll(byteVectorOfLengthNGen(32)) { balance =>
+      forAll(genBoundedByteVector(32, 32)) { balance =>
         val invalidBalanceAccount = senderAccountBeforeHomestead.copy(balance = UInt256(balance))
         val result = transactionValidator
           .validate(signedTxBeforeHomestead,

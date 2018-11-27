@@ -1,7 +1,8 @@
 package jbok.core.models
 
-import jbok.codec.rlp.RlpCodec
-import jbok.codec.rlp.implicits._
+import io.circe.generic.JsonCodec
 import scodec.bits.ByteVector
+import jbok.codec.json.implicits._
 
-case class TxLogEntry(loggerAddress: Address, logTopics: List[ByteVector], data: ByteVector)
+@JsonCodec
+final case class TxLogEntry(loggerAddress: Address, logTopics: List[ByteVector], data: ByteVector)

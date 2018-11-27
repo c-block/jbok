@@ -22,11 +22,17 @@ lazy val V = new {
   val fs2             = "1.0.0"
   val catsEffect      = "1.0.0"
   val catsCollections = "0.7.0"
+  val refined         = "0.9.3"
 }
 
 lazy val jbok = project
   .in(file("."))
-  .aggregate(core.jvm, core.js)
+  .aggregate(
+    crypto.jvm,
+    persistent.jvm,
+    core.jvm,
+    core.js
+  )
   .settings(noPublishSettings)
 
 lazy val common = crossProject(JSPlatform, JVMPlatform)
@@ -41,6 +47,11 @@ lazy val common = crossProject(JSPlatform, JVMPlatform)
       "org.typelevel" %% "cats-collections-core" % V.catsCollections,
       "co.fs2"        %%% "fs2-core"             % V.fs2,
       "co.fs2"        %% "fs2-io"                % V.fs2,
+      // refined
+      "eu.timepit" %%% "refined"           % V.refined,
+      "eu.timepit" %%% "refined-cats"      % V.refined,
+      "eu.timepit" %%% "refined-scodec"    % V.refined,
+      "eu.timepit" %%% "refined-shapeless" % V.refined,
       // json
       "io.circe" %%% "circe-core"    % V.circe,
       "io.circe" %%% "circe-generic" % V.circe,
@@ -63,8 +74,9 @@ lazy val common = crossProject(JSPlatform, JVMPlatform)
       // command line
       "org.rogach" %%% "scallop" % "3.1.3",
       // test
-      "org.scalatest"  %%% "scalatest"  % "3.0.5"  % Test,
-      "org.scalacheck" %%% "scalacheck" % "1.13.4" % Test
+      "org.scalatest"  %%% "scalatest"               % "3.0.5"   % Test,
+      "org.scalacheck" %%% "scalacheck"              % "1.13.4"  % Test,
+      "eu.timepit"     %%% "refined-scalacheck_1.13" % V.refined % Test
     )
   )
 
@@ -75,7 +87,7 @@ lazy val core = crossProject(JSPlatform, JVMPlatform)
   .settings(
     name := "jbok-core"
   )
-  .dependsOn(common % CompileAndTest, codec, crypto, network, persistent)
+  .dependsOn(common % CompileAndTest, codec, crypto % CompileAndTest, network, persistent)
 
 lazy val crypto = crossProject(JSPlatform, JVMPlatform)
   .crossType(CrossType.Full)
@@ -184,9 +196,9 @@ lazy val network = crossProject(JVMPlatform, JSPlatform)
   .settings(
     name := "jbok-network",
     libraryDependencies ++= http4s ++ Seq(
-      "com.spinoco" %% "fs2-http" % "0.4.0",
+      "com.spinoco"              %% "fs2-http"  % "0.4.0",
       "com.offbynull.portmapper" % "portmapper" % "2.0.5",
-      "org.bitlet" % "weupnp" % "0.1.4"
+      "org.bitlet"               % "weupnp"     % "0.1.4"
     )
   )
   .jsSettings(commonJsSettings)
@@ -202,8 +214,7 @@ lazy val persistent = crossProject(JSPlatform, JVMPlatform)
     libraryDependencies ++= Seq(
       "org.iq80.leveldb"          % "leveldb"        % "0.10",
       "org.fusesource.leveldbjni" % "leveldbjni-all" % "1.8"
-    ),
-    resolvers += "4th line" at "http://4thline.org/m2/"
+    )
   )
   .dependsOn(common % CompileAndTest, codec)
 
@@ -229,12 +240,12 @@ lazy val docs = project
 
 // dependencies
 lazy val tsec = Seq(
-  "io.github.jmcardon" %% "tsec-common"     % V.tsec,
-  "io.github.jmcardon" %% "tsec-hash-jca"   % V.tsec,
-  "io.github.jmcardon" %% "tsec-signatures" % V.tsec,
-  "io.github.jmcardon" %% "tsec-cipher-jca" % V.tsec,
-  "io.github.jmcardon" %% "tsec-password"   % V.tsec
-)
+  "io.github.jmcardon" %% "tsec-common",
+  "io.github.jmcardon" %% "tsec-hash-jca",
+  "io.github.jmcardon" %% "tsec-signatures",
+  "io.github.jmcardon" %% "tsec-cipher-jca",
+  "io.github.jmcardon" %% "tsec-password"
+).map(_ % V.tsec)
 
 lazy val http4s = Seq(
   "org.http4s" %% "http4s-core",
@@ -250,9 +261,10 @@ lazy val commonSettings = Seq(
   addCompilerPlugin("org.scalamacros" % "paradise"            % "2.1.0" cross CrossVersion.full),
   addCompilerPlugin("com.olegpy"      %% "better-monadic-for" % "0.2.4"),
   addCompilerPlugin("org.spire-math"  %% "kind-projector"     % "0.9.7"),
+//  addCompilerPlugin("ch.epfl.scala"   %% "scalac-profiling"   % "1.0.0"),
 //  addCompilerPlugin(scalafixSemanticdb),
   fork := true,
-  connectInput := true,
+  fork in Test := false,
   parallelExecution in test := false,
   scalacOpts
 )
@@ -284,7 +296,9 @@ lazy val scalacOpts = scalacOptions := Seq(
   "-Ypartial-unification",
   "-language:higherKinds",
   "-language:implicitConversions",
-  "-language:postfixOps"
+  "-language:postfixOps",
+//  "-P:scalac-profiling:generate-macro-flamegraph",
+//  "-P:scalac-profiling:no-profiledb"
 //  "-Yrangepos", // required by SemanticDB compiler plugin
 //  "-Ywarn-unused-import" // required by `RemoveUnused` rule
 )

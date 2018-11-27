@@ -1,10 +1,15 @@
 package jbok.app.api
 
 import cats.effect.IO
+import io.circe.generic.JsonCodec
 import jbok.core.models._
 import scodec.bits.ByteVector
+import jbok.codec.json.implicits._
 
+@JsonCodec
 case class GetWorkResponse(powHeaderHash: ByteVector, dagSeed: ByteVector, target: ByteVector)
+
+@JsonCodec
 sealed trait BlockParam
 object BlockParam {
   case class WithNumber(n: BigInt) extends BlockParam
@@ -13,6 +18,7 @@ object BlockParam {
   case object Earliest             extends BlockParam
 }
 
+@JsonCodec
 case class CallTx(
     from: Option[Address],
     to: Option[Address],
@@ -22,6 +28,7 @@ case class CallTx(
     data: ByteVector
 )
 
+@JsonCodec
 case class SyncingStatus(startingBlock: BigInt, currentBlock: BigInt, highestBlock: BigInt)
 
 trait PublicAPI {
@@ -84,30 +91,6 @@ trait PublicAPI {
   def getStorageAt(address: Address, position: BigInt, blockParam: BlockParam): IO[ByteVector]
 
   def getTransactionCount(address: Address, blockParam: BlockParam): IO[BigInt]
-
-  def newFilter(
-      fromBlock: Option[BlockParam],
-      toBlock: Option[BlockParam],
-      address: Option[Address],
-      topics: List[List[ByteVector]]
-  ): IO[BigInt]
-
-  def newBlockFilter: IO[BigInt]
-
-  def newPendingTransactionFilter: IO[BigInt]
-
-  def uninstallFilter(filterId: BigInt): IO[Boolean]
-
-  def getFilterChanges(filterId: BigInt): IO[FilterChanges]
-
-  def getFilterLogs(filterId: BigInt): IO[FilterLogs]
-
-  def getLogs(
-      fromBlock: Option[BlockParam],
-      toBlock: Option[BlockParam],
-      address: Option[Address],
-      topics: List[List[ByteVector]]
-  ): IO[LogFilterLogs]
 
   def getAccountTransactions(address: Address, fromBlock: BigInt, toBlock: BigInt): IO[List[SignedTransaction]]
 }

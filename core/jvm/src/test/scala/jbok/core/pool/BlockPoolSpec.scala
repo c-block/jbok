@@ -1,194 +1,133 @@
 package jbok.core.pool
 
 import cats.effect.IO
+import cats.implicits._
 import jbok.JbokSpec
-import jbok.core.HistoryFixture
-import jbok.core.models.{Block, BlockBody, BlockHeader}
+import jbok.common.testkit._
+import jbok.core.mining.BlockMiner
+import jbok.core.models.{Block, SignedTransaction}
 import jbok.core.pool.BlockPool.Leaf
-import jbok.testkit.Gens
-import scodec.bits.ByteVector
-import jbok.common.execution._
-
-trait BlockPoolFixture extends HistoryFixture {
-  val blockPool = BlockPool[IO](history).unsafeRunSync()
-
-  def setBestBlockNumber(n: BigInt) =
-    history.putBestBlockNumber(n).unsafeRunSync()
-
-  def setTotalDifficultyForParent(block: Block, td: BigInt) =
-    history.putDifficulty(block.header.parentHash, td).unsafeRunSync()
-
-  def setBlockExists(block: Block, inChain: Boolean, inQueue: Boolean) =
-    if (inChain) {
-      history.putBlock(block).unsafeRunSync()
-    } else if (inQueue) {
-      blockPool.addBlock(block, 1).unsafeRunSync()
-    } else {
-      ()
-    }
-
-  def setBestBlock(block: Block) = {
-    history.putBlock(block).unsafeRunSync()
-    history.putBestBlockNumber(block.header.number).unsafeRunSync()
-  }
-
-  def setTotalDifficultyForBlock(block: Block, td: BigInt) =
-    history.putDifficulty(block.header.hash, td).unsafeRunSync()
-
-  def randomHash() = Gens.byteVectorOfLengthNGen(32).sample.get
-
-  val defaultHeader = BlockHeader(
-    parentHash = ByteVector.empty,
-    ommersHash = ByteVector.empty,
-    beneficiary = ByteVector.empty,
-    stateRoot = ByteVector.empty,
-    transactionsRoot = ByteVector.empty,
-    receiptsRoot = ByteVector.empty,
-    logsBloom = ByteVector.empty,
-    difficulty = 1000000,
-    number = 1,
-    gasLimit = 1000000,
-    gasUsed = 0,
-    unixTimestamp = 0,
-    extraData = ByteVector.empty,
-    mixHash = ByteVector.empty,
-    nonce = ByteVector.empty
-  )
-
-  def getBlock(
-      number: BigInt,
-      difficulty: BigInt = 1000000,
-      parent: ByteVector = randomHash(),
-      salt: ByteVector = randomHash(),
-      ommers: List[BlockHeader] = Nil
-  ): Block =
-    Block(
-      defaultHeader.copy(parentHash = parent, difficulty = difficulty, number = number, extraData = salt),
-      BlockBody(Nil, ommers)
-    )
-}
+import jbok.core.testkit._
 
 class BlockPoolSpec extends JbokSpec {
   "BlockPool" should {
-    "ignore block if it's already in" in new BlockPoolFixture {
-      val block = getBlock(1)
-      setBestBlockNumber(1)
-      setTotalDifficultyForParent(block, 0)
+    implicit val fixture = defaultFixture()
 
-      blockPool.addBlock(block, 1).unsafeRunSync() shouldEqual Some(Leaf(block.header.hash, block.header.difficulty))
-      blockPool.addBlock(block, 1).unsafeRunSync() shouldEqual None
-      blockPool.contains(block.header.hash).unsafeRunSync() shouldBe true
+    def randomTx = random[List[SignedTransaction]](genTxs(1, 1)).some
+
+    "ignore block if it's already in" in {
+      val pool              = random[BlockPool[IO]]
+      val block             = random[List[Block]](genBlocks(1, 1)).head
+      val genesisDifficulty = pool.history.genesisHeader.unsafeRunSync().difficulty
+
+      pool.addBlock(block).unsafeRunSync() shouldBe Some(
+        Leaf(block.header.hash, genesisDifficulty + block.header.difficulty))
+      pool.addBlock(block).unsafeRunSync() shouldBe None
+      pool.contains(block.header.hash).unsafeRunSync() shouldBe true
     }
-  }
 
-  "ignore blocks outside of range" in new BlockPoolFixture {
-    val block1  = getBlock(1)
-    val block30 = getBlock(30)
-    setBestBlockNumber(15)
+    "ignore blocks outside of range" in {
+      val pool   = random[BlockPool[IO]]
+      val blocks = random[List[Block]](genBlocks(30, 30))
+      pool.history.putBestBlockNumber(15).unsafeRunSync()
+      pool.addBlock(blocks.head).unsafeRunSync()
+      pool.contains(blocks.head.header.hash).unsafeRunSync() shouldBe false
 
-    blockPool.addBlock(block1, 15).unsafeRunSync()
-    blockPool.contains(block1.header.hash).unsafeRunSync() shouldBe false
+      pool.addBlock(blocks.last).unsafeRunSync()
+      pool.contains(blocks.last.header.hash).unsafeRunSync() shouldBe false
+    }
 
-    blockPool.addBlock(block30, 15).unsafeRunSync()
-    blockPool.contains(block30.header.hash).unsafeRunSync() shouldBe false
-  }
+    "remove the blocks that fall out of range" in {
+      val pool   = random[BlockPool[IO]]
+      val blocks = random[List[Block]](genBlocks(20, 20))
 
-  "remove the blocks that fall out of range" in new BlockPoolFixture {
-    val block1 = getBlock(1)
-    setBestBlockNumber(1)
+      pool.addBlock(blocks.head).unsafeRunSync()
+      pool.contains(blocks.head.header.hash).unsafeRunSync() shouldBe true
 
-    blockPool.addBlock(block1, 1).unsafeRunSync()
-    blockPool.contains(block1.header.hash).unsafeRunSync() shouldBe true
+      pool.history.putBestBlockNumber(20).unsafeRunSync()
 
-    val block20 = getBlock(20)
-    setBestBlockNumber(20)
+      pool.addBlock(blocks.last).unsafeRunSync()
+      pool.contains(blocks.last.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(blocks.head.header.hash).unsafeRunSync() shouldBe false
+    }
 
-    blockPool.addBlock(block20, 20).unsafeRunSync()
-    blockPool.contains(block20.header.hash).unsafeRunSync() shouldBe true
-    blockPool.contains(block1.header.hash).unsafeRunSync() shouldBe false
-  }
+    "enqueue a block with queued ancestors rooted to the main chain updating its total difficulty" in {
+      val pool    = random[BlockPool[IO]]
+      val miner   = random[BlockMiner[IO]]
+      val block1  = miner.mine1().unsafeRunSync().block
+      val block2a = miner.mine1(block1.some, randomTx).unsafeRunSync().block
+      val block2b = miner.mine1(block1.some, randomTx).unsafeRunSync().block
+      val block3  = miner.mine1(block2a.some).unsafeRunSync().block
 
-  "enqueue a block with parent on the main chain updating its total difficulty" in new BlockPoolFixture {
-    val block1 = getBlock(1, 13)
-    setBestBlockNumber(1)
-    setTotalDifficultyForParent(block1, 42)
+      pool.addBlock(block1).unsafeRunSync()
+      pool.addBlock(block2a).unsafeRunSync()
+      pool.addBlock(block2b).unsafeRunSync()
 
-    blockPool.addBlock(block1, 1).unsafeRunSync() shouldBe Some(Leaf(block1.header.hash, block1.header.difficulty + 42))
-  }
+      val expectedTd = 1024 + List(block1, block2a, block3).map(_.header.difficulty).sum
+      pool.addBlock(block3).unsafeRunSync() shouldBe Some(Leaf(block3.header.hash, expectedTd))
+    }
 
-  "enqueue a block with queued ancestors rooted to the main chain updating its total difficulty" in new BlockPoolFixture {
-    val block1  = getBlock(1, 101)
-    val block2a = getBlock(2, 102, block1.header.hash)
-    val block2b = getBlock(2, 99, block1.header.hash)
-    val block3  = getBlock(3, 103, block2a.header.hash)
+    "pool an orphaned block" in {
+      val pool  = random[BlockPool[IO]]
+      val block = random[List[Block]](genBlocks(2, 2)).last
 
-    setBestBlockNumber(1)
-    setTotalDifficultyForParent(block1, 42)
+      pool.addBlock(block).unsafeRunSync() shouldBe None
+      pool.contains(block.header.hash).unsafeRunSync() shouldBe true
+    }
 
-    blockPool.addBlock(block1, 1).unsafeRunSync()
-    blockPool.addBlock(block2a, 1).unsafeRunSync()
-    blockPool.addBlock(block2b, 1).unsafeRunSync()
+    "remove a branch from a leaf up to the first shared ancestor" in {
+      val pool    = random[BlockPool[IO]]
+      val miner   = random[BlockMiner[IO]]
+      val block1  = miner.mine1().unsafeRunSync().block
+      val block2a = miner.mine1(block1.some, randomTx).unsafeRunSync().block
+      val block2b = miner.mine1(block1.some, randomTx).unsafeRunSync().block
+      val block2c = miner.mine1(block1.some).unsafeRunSync().block
+      val block3  = miner.mine1(block2a.some).unsafeRunSync().block
 
-    val expectedTd = 42 + List(block1, block2a, block3).map(_.header.difficulty).sum
-    blockPool.addBlock(block3, 1).unsafeRunSync() shouldBe Some(Leaf(block3.header.hash, expectedTd))
-  }
+      pool.addBlock(block1).unsafeRunSync()
+      pool.addBlock(block2a).unsafeRunSync()
+      pool.addBlock(block2b).unsafeRunSync()
+      pool.addBlock(block3).unsafeRunSync()
 
-  "enqueue an orphaned block" in new BlockPoolFixture {
-    val block1 = getBlock(1)
-    setBestBlockNumber(1)
+      pool.getBranch(block3.header.hash, delete = true).unsafeRunSync() shouldBe List(block1, block2a, block3)
 
-    blockPool.addBlock(block1, 1).unsafeRunSync() shouldBe None
-    blockPool.contains(block1.header.hash).unsafeRunSync() shouldBe true
-  }
+      pool.contains(block3.header.hash).unsafeRunSync() shouldBe false
+      pool.contains(block2a.header.hash).unsafeRunSync() shouldBe false
+      pool.contains(block2b.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(block1.header.hash).unsafeRunSync() shouldBe true
+    }
 
-  "remove a branch from a leaf up to the first shared ancestor" in new BlockPoolFixture {
-    val block1  = getBlock(1)
-    val block2a = getBlock(2, parent = block1.header.hash)
-    val block2b = getBlock(2, parent = block1.header.hash)
-    val block3  = getBlock(3, parent = block2a.header.hash)
+    "remove a whole subtree down from an ancestor to all its leaves" in {
+      val pool    = random[BlockPool[IO]]
+      val miner   = random[BlockMiner[IO]]
+      val genesis = miner.history.getBestBlock.unsafeRunSync()
+      val txs = random[List[SignedTransaction]](genTxs(2, 2))
 
-    setBestBlockNumber(1)
+      val block1a = miner.mine1(genesis.some, txs.take(1).some).unsafeRunSync().block
+      val block1b = miner.mine1(genesis.some).unsafeRunSync().block
+      val block2a = miner.mine1(block1a.some, txs.takeRight(1).some).unsafeRunSync().block
+      val block2b = miner.mine1(block1a.some).unsafeRunSync().block
+      val block3  = miner.mine1(block2a.some).unsafeRunSync().block
 
-    blockPool.addBlock(block1, 1).unsafeRunSync()
-    blockPool.addBlock(block2a, 1).unsafeRunSync()
-    blockPool.addBlock(block2b, 1).unsafeRunSync()
-    blockPool.addBlock(block3, 1).unsafeRunSync()
+      pool.addBlock(block1a).unsafeRunSync()
+      pool.addBlock(block1b).unsafeRunSync()
+      pool.addBlock(block2a).unsafeRunSync()
+      pool.addBlock(block2b).unsafeRunSync()
+      pool.addBlock(block3).unsafeRunSync()
 
-    blockPool.getBranch(block3.header.hash, dequeue = true).unsafeRunSync() shouldBe List(block1, block2a, block3)
+      pool.contains(block3.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(block2a.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(block2b.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(block1a.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(block1b.header.hash).unsafeRunSync() shouldBe true
 
-    blockPool.contains(block3.header.hash).unsafeRunSync() shouldBe false
-    blockPool.contains(block2a.header.hash).unsafeRunSync() shouldBe false
-    blockPool.contains(block2b.header.hash).unsafeRunSync() shouldBe true
-    blockPool.contains(block1.header.hash).unsafeRunSync() shouldBe true
-  }
+      pool.removeSubtree(block1a.header.hash).unsafeRunSync()
 
-  "remove a whole subtree down from an ancestor to all its leaves" in new BlockPoolFixture {
-    val block1a = getBlock(1)
-    val block1b = getBlock(1)
-    val block2a = getBlock(2, parent = block1a.header.hash)
-    val block2b = getBlock(2, parent = block1a.header.hash)
-    val block3  = getBlock(3, parent = block2a.header.hash)
-
-    setBestBlockNumber(1)
-
-    blockPool.addBlock(block1a, 1).unsafeRunSync()
-    blockPool.addBlock(block1b, 1).unsafeRunSync()
-    blockPool.addBlock(block2a, 1).unsafeRunSync()
-    blockPool.addBlock(block2b, 1).unsafeRunSync()
-    blockPool.addBlock(block3, 1).unsafeRunSync()
-
-    blockPool.contains(block3.header.hash).unsafeRunSync() shouldBe true
-    blockPool.contains(block2a.header.hash).unsafeRunSync() shouldBe true
-    blockPool.contains(block2b.header.hash).unsafeRunSync() shouldBe true
-    blockPool.contains(block1a.header.hash).unsafeRunSync() shouldBe true
-    blockPool.contains(block1b.header.hash).unsafeRunSync() shouldBe true
-
-    blockPool.removeSubtree(block1a.header.hash).unsafeRunSync()
-
-    blockPool.contains(block3.header.hash).unsafeRunSync() shouldBe false
-    blockPool.contains(block2a.header.hash).unsafeRunSync() shouldBe false
-    blockPool.contains(block2b.header.hash).unsafeRunSync() shouldBe false
-    blockPool.contains(block1a.header.hash).unsafeRunSync() shouldBe false
-    blockPool.contains(block1b.header.hash).unsafeRunSync() shouldBe true
+      pool.contains(block3.header.hash).unsafeRunSync() shouldBe false
+      pool.contains(block2a.header.hash).unsafeRunSync() shouldBe false
+      pool.contains(block2b.header.hash).unsafeRunSync() shouldBe false
+      pool.contains(block1a.header.hash).unsafeRunSync() shouldBe false
+      pool.contains(block1b.header.hash).unsafeRunSync() shouldBe true
+    }
   }
 }

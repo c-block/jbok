@@ -1,73 +1,43 @@
 package jbok.network.nat
 
+import cats.effect.IO
 import jbok.JbokSpec
+import jbok.common.execution._
+import jbok.common.testkit._
+import jbok.network.client.Client
+import jbok.network.server.Server
+import jbok.network.testkit._
 
-class NatSpec extends JbokSpec{
-  val log = org.log4s.getLogger
+import scala.concurrent.duration._
 
-  "nat-pmp" should {
-    "add mapping" in {
-      val result = for {
-        pmp <- Nat(NatPMP)
-        result <- pmp.addMapping(12346,12346,120)
-      }yield result
+class NatSpec extends JbokSpec {
+  val externalIP: String = ""
+  val internalPort = 12345
+  val externalPort = 12346
+  val server       = random[Server[IO]](genTcpServer(internalPort))
+  val client       = random[Client[IO, Data]](genTcpClient(externalPort))
 
-      result.attempt.unsafeRunSync() match {
-        case Left(e) => {
-          log.error(e)("nat-pmp add mapping error")
-          assert(false)
-        }
-        case Right(s) => assert(s)
-      }
+  def checkNat(natType: NatType) =
+    s"NAT $natType" should {
+      "add and delete mapping" ignore {
+        val p = for {
+          nat <- Nat[IO](natType)
+          _   <- nat.addMapping(internalPort, externalPort, 120)
+          _   <- nat.deleteMapping(externalPort)
+          _   <- nat.addMapping(internalPort, externalPort, 120)
+          _ = server.start
+          _   <- T.sleep(1.second)
+          _   <- client.start
+          _   <- client.write(Data("hello"))
+          res <- client.read
+          _ = res.data shouldBe "hello"
+          _ <- server.stop
+        } yield ()
 
-    }
-    "delete mapping" in {
-      val delResult = for {
-        pmp <- Nat(NatPMP)
-        result <- pmp.deleteMapping(12346,12346)
-      }yield result
-
-      delResult.attempt.unsafeRunSync() match {
-        case Left(e) => {
-          log.error(e)("nat-pmp delete mapping error")
-          assert(false)
-        }
-        case Right(s) => assert(s)
-      }
-    }
-  }
-
-  "upnp" should {
-    "add mapping" in {
-      val result = for {
-        upnp <- Nat(NatUPnP)
-        result <- upnp.addMapping(12346,12346,120)
-      }yield result
-
-      result.attempt.unsafeRunSync() match {
-        case Left(e) => {
-          log.error(e)("upnp add mapping error")
-          assert(false)
-        }
-        case Right(s) => assert(s)
-      }
-
-    }
-
-    "delete mapping" in {
-      val delResult = for {
-        upnp <- Nat(NatUPnP)
-        result <- upnp.deleteMapping(12346,12346)
-      }yield result
-
-      delResult.attempt.unsafeRunSync() match {
-        case Left(e) => {
-          log.error(e)("upnp delete mapping error")
-          assert(false)
-        }
-        case Right(s) => assert(s)
+        p.unsafeRunSync()
       }
     }
-  }
 
+  checkNat(NatPMP)
+  checkNat(NatUPnP)
 }

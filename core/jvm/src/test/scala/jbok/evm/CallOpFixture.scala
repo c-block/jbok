@@ -3,8 +3,7 @@ package jbok.evm
 import cats.effect.IO
 import jbok.core.models.{Account, Address, UInt256}
 import jbok.crypto._
-import jbok.evm._
-import jbok.testkit.VMGens
+import jbok.evm.testkit._
 import scodec.bits.ByteVector
 
 class CallOpFixture(val config: EvmConfig, val startState: WorldState[IO]) {
@@ -89,7 +88,7 @@ class CallOpFixture(val config: EvmConfig, val startState: WorldState[IO]) {
     RETURN
   )
 
-  val inputData = VMGens.getUInt256Gen().sample.get.bytes
+  val inputData = getUInt256Gen().sample.get.bytes
   val expectedMemCost = config.calcMemCost(inputData.size, inputData.size, inputData.size / 2)
 
   val initialBalance = UInt256(1000)
@@ -155,7 +154,7 @@ class CallOpFixture(val config: EvmConfig, val startState: WorldState[IO]) {
       outOffset: UInt256 = inputData.size,
       outSize: UInt256 = inputData.size / 2
   ) {
-    private val params = Seq(UInt256(gas), to.toUInt256, value, inOffset, inSize, outOffset, outSize).reverse
+    private val params = List(UInt256(gas), to.toUInt256, value, inOffset, inSize, outOffset, outSize).reverse
     private val paramsForDelegate = params.take(4) ++ params.drop(5)
     private val stack = Stack.empty().push(if (op == DELEGATECALL) paramsForDelegate else params)
     private val mem = Memory.empty.store(UInt256.Zero, inputData)

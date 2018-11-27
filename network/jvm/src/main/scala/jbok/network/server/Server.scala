@@ -9,7 +9,7 @@ import cats.implicits._
 import com.codahale.metrics.ConsoleReporter
 import fs2._
 import fs2.concurrent.{Queue, SignallingRef}
-import jbok.network.common.TcpUtil
+import jbok.network.common.{RequestId, TcpUtil}
 import org.http4s.{EntityDecoder, HttpRoutes, Request, Response, StaticFile}
 import org.http4s.dsl.Http4sDsl
 import org.http4s.server.Router
@@ -20,7 +20,6 @@ import scodec.Codec
 import scodec.bits.BitVector
 
 import scala.concurrent.ExecutionContext
-
 import scala.concurrent.duration.Duration
 
 trait Server[F[_]] {
@@ -28,12 +27,12 @@ trait Server[F[_]] {
 
   def haltWhenTrue: SignallingRef[F, Boolean]
 
-  def serve: Stream[F, Unit]
+  def stream: Stream[F, Unit]
 
   def start(implicit F: Concurrent[F]): F[Unit] =
     haltWhenTrue.get.flatMap {
       case false => F.unit
-      case true  => haltWhenTrue.set(false) *> serve.interruptWhen(haltWhenTrue).compile.drain.start.void
+      case true  => haltWhenTrue.set(false) *> stream.interruptWhen(haltWhenTrue).compile.drain.start.void
     }
 
   def stop(implicit F: Concurrent[F]): F[Unit] =
@@ -41,7 +40,7 @@ trait Server[F[_]] {
 }
 
 object Server {
-  def tcp[F[_], A: Codec](bind: InetSocketAddress, pipe: Pipe[F, A, A], maxOpen: Int = Int.MaxValue)(
+  def tcp[F[_], A: Codec: RequestId](bind: InetSocketAddress, pipe: Pipe[F, A, A], maxOpen: Int = Int.MaxValue)(
       implicit F: ConcurrentEffect[F],
       T: Timer[F],
       AG: AsynchronousChannelGroup): F[Server[F]] =
@@ -49,13 +48,13 @@ object Server {
       signal <- SignallingRef[F, Boolean](true)
     } yield
       new Server[F] {
-        private[this] val log = org.log4s.getLogger
+        private[this] val log = org.log4s.getLogger("TcpServer")
 
         override val bindAddress: InetSocketAddress = bind
 
         override val haltWhenTrue: SignallingRef[F, Boolean] = signal
 
-        override val serve: Stream[F, Unit] =
+        override val stream: Stream[F, Unit] =
           fs2.io.tcp
             .serverWithLocalAddress[F](bind)
             .map {
@@ -64,17 +63,11 @@ object Server {
                 Stream.empty.covary[F]
 
               case Right(s) =>
-                Stream
-                  .resource(s)
-                  .flatMap(socket => {
-                    for {
-                      conn <- Stream.eval(TcpUtil.socketToConnection[F](socket, true))
-                      _ <- conn
-                        .reads[A]()
-                        .through(pipe)
-                        .to(conn.writes[A]())
-                    } yield ()
-                  })
+                for {
+                  conn <- Stream.eval(TcpUtil.socketToConnection[F, A](s, true))
+                  _    <- Stream.eval(conn.start)
+                  _    <- conn.reads.through(pipe).to(conn.sink)
+                } yield ()
             }
             .parJoin(maxOpen)
             .handleErrorWith(e => Stream.eval[F, Unit](F.delay(log.error(e)(s"server error: ${e}"))))
@@ -88,13 +81,13 @@ object Server {
       signal <- SignallingRef[F, Boolean](true)
     } yield
       new Server[F] {
-        private[this] val log = org.log4s.getLogger
+        private[this] val log = org.log4s.getLogger("WebsocketServer")
 
         override val bindAddress: InetSocketAddress = bind
 
         override val haltWhenTrue: SignallingRef[F, Boolean] = signal
 
-        override val serve: Stream[F, Unit] = {
+        override val stream: Stream[F, Unit] = {
           val dsl = Http4sDsl[F]
           import dsl._
           val service = HttpRoutes.of[F] {
@@ -142,13 +135,13 @@ object Server {
       signal <- SignallingRef[F, Boolean](true)
     } yield
       new Server[F] {
-        private[this] val log = org.log4s.getLogger
+        private[this] val log = org.log4s.getLogger("HttpServer")
 
         override val bindAddress: InetSocketAddress = bind
 
         override val haltWhenTrue: SignallingRef[F, Boolean] = signal
 
-        override val serve: Stream[F, Unit] = {
+        override val stream: Stream[F, Unit] = {
           val dsl = Http4sDsl[F]
           import dsl._
 
