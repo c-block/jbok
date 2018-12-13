@@ -6,7 +6,7 @@ import cats.effect.{ConcurrentEffect, Resource, Sync, Timer}
 import cats.implicits._
 import jbok.codec.rlp.implicits._
 import jbok.common.ByteUtils
-import jbok.core.config.Configs.{BlockChainConfig, TxPoolConfig}
+import jbok.core.config.Configs.{HistoryConfig, TxPoolConfig}
 import jbok.core.consensus.Consensus
 import jbok.core.ledger.TypedBlock._
 import jbok.core.messages.SignedTransactions
@@ -22,15 +22,14 @@ import scodec.bits.ByteVector
 import scala.concurrent.duration._
 
 case class BlockExecutor[F[_]](
-    config: BlockChainConfig,
+    config: HistoryConfig,
     consensus: Consensus[F],
     peerManager: PeerManager[F],
-    vm: VM,
     txValidator: TxValidator[F],
     txPool: TxPool[F],
     ommerPool: OmmerPool[F],
     semaphore: Semaphore[F]
-)(implicit F: Sync[F], T: Timer[F]) {
+)(implicit F: Sync[F], T: Timer[F], chainId: BigInt) {
   private[this] val log = org.log4s.getLogger("BlockExecutor")
 
   import BlockExecutor._
@@ -117,7 +116,7 @@ case class BlockExecutor[F[_]](
   ////////////////////////////////
   ////////////////////////////////
 
-  private def executeBlock(block: Block): F[ExecutedBlock[F]] =
+  private[jbok] def executeBlock(block: Block): F[ExecutedBlock[F]] =
     for {
       (result, _) <- executeTransactions(block, shortCircuit = true)
       parentTd    <- history.getTotalDifficultyByHash(block.header.parentHash).map(_.get)
@@ -145,7 +144,7 @@ case class BlockExecutor[F[_]](
           newBranch.traverse(executeBlock).map(_.map(_.block)) <* updateTxAndOmmerPools(oldBranch, newBranch)
 
         case Consensus.Stash(block) =>
-          blockPool.addBlock(block) *> ommerPool.addOmmers(List(block.header)) as Nil
+          blockPool.addBlock(block) >> ommerPool.addOmmers(List(block.header)) as Nil
 
         case Consensus.Discard(e) =>
           log.warn(s"discard ${block.tag} because ${e}")
@@ -241,7 +240,7 @@ case class BlockExecutor[F[_]](
       checkpointWorldState <- updateSenderAccountBeforeExecution(senderAddress, stx, worldForTx)
       context              <- prepareProgramContext(stx, senderAddress, header, checkpointWorldState, vmConfig)
       result               <- runVM(stx, context, vmConfig)
-      resultWithErrorHandling = if (result.error.isDefined) {
+      resultWithErrorHandling = if (result.error.isDefined || result.isRevert) {
         //Rollback to the world before transfer was done if an error happened
         result.copy(world = checkpointWorldState, addressesToDelete = Set.empty, logs = Nil)
       } else {
@@ -303,9 +302,9 @@ case class BlockExecutor[F[_]](
 
   private def runVM(stx: SignedTransaction, context: ProgramContext[F], config: EvmConfig): F[ProgramResult[F]] =
     for {
-      result <- vm.run(context)
+      result <- VM.run(context)
     } yield {
-      if (stx.isContractInit && result.error.isEmpty)
+      if (stx.isContractInit && result.error.isEmpty && !result.isRevert)
         saveNewContract(context.env.ownerAddr, result, config)
       else
         result
@@ -347,7 +346,7 @@ case class BlockExecutor[F[_]](
     UInt256(stx.gasLimit * stx.gasPrice)
 
   private def calcTotalGasToRefund(stx: SignedTransaction, result: ProgramResult[F]): BigInt =
-    if (result.error.isEmpty || result.error.contains(RevertOp)) {
+    if (result.error.isEmpty || result.isRevert) {
       val gasUsed = stx.gasLimit - result.gasRemaining
       // remaining gas plus some allowance
       result.gasRemaining + (gasUsed / 2).min(result.gasRefund)
@@ -386,7 +385,7 @@ case class BlockExecutor[F[_]](
       _ <- ommerPool.addOmmers(blocksRemoved.headOption.toList.map(_.header))
       _ <- blocksRemoved.map(_.body.transactionList).traverse(txs => txPool.addTransactions(SignedTransactions(txs)))
       _ <- blocksAdded.map { block =>
-        ommerPool.removeOmmers(block.header :: block.body.ommerList) *>
+        ommerPool.removeOmmers(block.header :: block.body.ommerList) >>
           txPool.removeTransactions(block.body.transactionList)
       }.sequence
     } yield ()
@@ -408,15 +407,14 @@ object BlockExecutor {
   )
 
   def apply[F[_]](
-      config: BlockChainConfig,
+      config: HistoryConfig,
       consensus: Consensus[F],
       peerManager: PeerManager[F],
-  )(implicit F: ConcurrentEffect[F], T: Timer[F]): F[BlockExecutor[F]] =
+  )(implicit F: ConcurrentEffect[F], T: Timer[F], chainId: BigInt): F[BlockExecutor[F]] =
     for {
       txPool    <- TxPool[F](TxPoolConfig(), peerManager)
       ommerPool <- OmmerPool[F](consensus.history)
       semaphore <- Semaphore(1)
-      vm          = new VM
       txValidator = new TxValidator[F](config)
-    } yield BlockExecutor(config, consensus, peerManager, vm, txValidator, txPool, ommerPool, semaphore)
+    } yield BlockExecutor(config, consensus, peerManager, txValidator, txPool, ommerPool, semaphore)
 }

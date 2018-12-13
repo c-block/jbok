@@ -1,11 +1,11 @@
 package jbok.core.consensus.pow.ethash
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, OptionT}
 import cats.effect.Sync
 import cats.implicits._
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.implicits._
-import jbok.core.config.Configs.{BlockChainConfig, MiningConfig, MonetaryPolicyConfig}
+import jbok.core.config.Configs.{HistoryConfig, MiningConfig, MonetaryPolicyConfig}
 import jbok.core.consensus.Consensus
 import jbok.core.ledger.TypedBlock.MinedBlock
 import jbok.core.ledger.{History, TypedBlock}
@@ -17,7 +17,7 @@ import jbok.common._
 import scodec.bits.ByteVector
 
 class EthashConsensus[F[_]](
-    blockChainConfig: BlockChainConfig,
+    blockChainConfig: HistoryConfig,
     miningConfig: MiningConfig,
     history: History[F],
     blockPool: BlockPool[F],
@@ -48,9 +48,7 @@ class EthashConsensus[F[_]](
         gasLimit = calcGasLimit(parent.header.gasLimit),
         gasUsed = 0,
         unixTimestamp = timestamp,
-        extraData = blockChainConfig.daoForkConfig
-          .flatMap(daoForkConfig => daoForkConfig.getExtraData(number))
-          .getOrElse(miningConfig.headerExtraData),
+        extraData = miningConfig.extraData,
         mixHash = ByteVector.empty,
         nonce = ByteVector.empty
       )
@@ -63,12 +61,12 @@ class EthashConsensus[F[_]](
   override def verify(block: Block): F[Unit] =
     history.getBlockHeaderByHash(block.header.parentHash).flatMap {
       case Some(parent) =>
-        headerValidator.validate(parent, block.header) *> ommersValidator.validate(
+        headerValidator.validate(parent, block.header) >> ommersValidator.validate(
           block.header.parentHash,
           block.header.number,
           block.body.ommerList,
-          blockPool.getHeader,
-          blockPool.getNBlocks
+          getHeaderFromHistoryOrPool,
+          getNBlocks
         )
 
       case None => F.raiseError(HeaderParentNotFoundInvalid)
@@ -123,6 +121,30 @@ class EthashConsensus[F[_]](
 
   ////////////////////////////////////
   ////////////////////////////////////
+
+  private def getHeaderFromHistoryOrPool(hash: ByteVector): F[Option[BlockHeader]] =
+    OptionT(history.getBlockHeaderByHash(hash))
+      .orElseF(blockPool.getPooledBlockByHash(hash).map(_.map(_.block.header)))
+      .value
+
+  private def getNBlocks(hash: ByteVector, n: Int): F[List[Block]] =
+    for {
+      pooledBlocks <- blockPool.getBranch(hash, delete = false).map(_.take(n))
+      result <- if (pooledBlocks.length == n) {
+        pooledBlocks.pure[F]
+      } else {
+        val chainedBlockHash = pooledBlocks.headOption.map(_.header.parentHash).getOrElse(hash)
+        history.getBlockByHash(chainedBlockHash).flatMap {
+          case None =>
+            F.pure(List.empty[Block])
+
+          case Some(block) =>
+            val remaining = n - pooledBlocks.length - 1
+            val numbers   = (block.header.number - remaining) until block.header.number
+            numbers.toList.map(history.getBlockByNumber).sequence.map(xs => (xs.flatten :+ block) ::: pooledBlocks)
+        }
+      }
+    } yield result
 
   /**
     * 1. head's parent is known

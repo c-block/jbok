@@ -51,9 +51,9 @@ class TxPoolSpec extends JbokSpec {
       val kp1 = random[KeyPair]
       val kp2 = random[KeyPair]
 
-      val first  = SignedTransaction.sign(tx1, kp1, 0)
-      val second = SignedTransaction.sign(tx2.copy(nonce = tx1.nonce), kp1, 0)
-      val other  = SignedTransaction.sign(tx3, kp2, 0)
+      val first  = SignedTransaction.sign[IO](tx1, kp1).unsafeRunSync()
+      val second = SignedTransaction.sign[IO](tx2.copy(nonce = tx1.nonce), kp1).unsafeRunSync()
+      val other  = SignedTransaction.sign[IO](tx3, kp2).unsafeRunSync()
 
       val p = for {
         _ <- txPool.addOrUpdateTransaction(first)
@@ -74,7 +74,7 @@ class TxPoolSpec extends JbokSpec {
         _  <- txPool.addTransactions(SignedTransactions(stx :: Nil))
         p1 <- txPool.getPendingTransactions
         _ = p1.size shouldBe 1
-        p2 <- T.sleep(2.seconds) *> txPool.getPendingTransactions
+        p2 <- T.sleep(2.seconds) >> txPool.getPendingTransactions
         _ = p2.size shouldBe 0
       } yield ()
       p.unsafeRunSync()

@@ -4,14 +4,15 @@ import cats.effect.IO
 import jbok.JbokSpec
 import jbok.common.testkit._
 import jbok.core.Fixtures
-import jbok.core.config.Configs.BlockChainConfig
+import jbok.core.config.Configs.HistoryConfig
 import jbok.core.models._
 import jbok.core.validators.TxInvalid._
-import jbok.crypto.signature.ecdsa.SecP256k1
+import jbok.crypto.signature.{ECDSA, Signature}
 import scodec.bits._
+import jbok.core.config.reference
 
 class TxValidatorSpec extends JbokSpec {
-  val keyPair = SecP256k1.generateKeyPair().unsafeRunSync()
+  val keyPair = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
 
   val tx = Transaction(
     nonce = 12345,
@@ -22,7 +23,7 @@ class TxValidatorSpec extends JbokSpec {
     payload = ByteVector.empty
   )
 
-  val stx = SignedTransaction.sign(tx, keyPair, 0x3d.toByte)
+  val stx = SignedTransaction.sign[IO](tx, keyPair).unsafeRunSync()
 
   val senderBalance = 100
 
@@ -34,7 +35,7 @@ class TxValidatorSpec extends JbokSpec {
 
   val upfrontGasCost: UInt256 = UInt256(senderBalance / 2)
 
-  val transactionValidator = new TxValidator[IO](BlockChainConfig())
+  val transactionValidator = new TxValidator[IO](reference.history)
 
   "TxValidator" should {
     "report as valid a tx from after EIP155" in {
@@ -48,11 +49,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(bigInt64Gen) { nonce =>
         val invalidSSignedTx = stx.copy(nonce = nonce)
         val result = transactionValidator
-          .validate(invalidSSignedTx,
-                    senderAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(invalidSSignedTx, senderAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         result.left.get shouldBe a[TxSyntaxInvalid]
@@ -63,11 +60,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(bigInt64Gen) { nonce =>
         val invalidSSignedTx = stx.copy(nonce = nonce)
         val result = transactionValidator
-          .validate(invalidSSignedTx,
-                    senderAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(invalidSSignedTx, senderAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         result.left.get shouldBe a[TxSyntaxInvalid]
@@ -78,11 +71,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(bigInt64Gen) { gasPrice =>
         val invalidGasPriceTx = stx.copy(gasPrice = gasPrice)
         val result = transactionValidator
-          .validate(invalidGasPriceTx,
-                    senderAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(invalidGasPriceTx, senderAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         result.left.get shouldBe a[TxSyntaxInvalid]
@@ -126,11 +115,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(bigIntGen) { r =>
         val invalidRSignedTx = stx.copy(r = r)
         val result = transactionValidator
-          .validate(invalidRSignedTx,
-                    senderAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(invalidRSignedTx, senderAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         if (r < transactionValidator.secp256k1n && r > 0) result shouldBe Right(())
@@ -154,11 +139,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(bigIntGen) { nonce =>
         val invalidNonceSignedTx = stx.copy(nonce = nonce)
         val result = transactionValidator
-          .validate(invalidNonceSignedTx,
-                    senderAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(invalidNonceSignedTx, senderAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         if (nonce == tx.nonce) result shouldBe Right(())
@@ -170,11 +151,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(bigIntGen) { gasLimit =>
         val invalidGasLimitTx = stx.copy(gasLimit = gasLimit)
         val result = transactionValidator
-          .validate(invalidGasLimitTx,
-                    senderAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(invalidGasLimitTx, senderAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         if (gasLimit == tx.gasLimit) result shouldBe Right(())
@@ -189,11 +166,7 @@ class TxValidatorSpec extends JbokSpec {
       forAll(genBoundedByteVector(32, 32)) { balance =>
         val invalidBalanceAccount = senderAccount.copy(balance = UInt256(balance))
         val result = transactionValidator
-          .validate(stx,
-                    invalidBalanceAccount,
-                    header,
-                    upfrontGasCost,
-                    accumGasUsed)
+          .validate(stx, invalidBalanceAccount, header, upfrontGasCost, accumGasUsed)
           .attempt
           .unsafeRunSync()
         if (UInt256(balance) >= upfrontGasCost) result shouldBe Right(())

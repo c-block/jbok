@@ -1,5 +1,7 @@
 package jbok.core
 
+import java.net.InetSocketAddress
+
 import cats.effect.IO
 import jbok.common.execution._
 import jbok.common.testkit._
@@ -11,34 +13,39 @@ import jbok.core.ledger.{BlockExecutor, History}
 import jbok.core.messages._
 import jbok.core.mining.{BlockMiner, SimAccount, TxGenerator}
 import jbok.core.models._
-import jbok.core.peer.{Peer, PeerManager, PeerManagerPlatform}
+import jbok.core.peer.discovery.{Discovery, PeerTable}
+import jbok.core.peer.{Peer, PeerManager, PeerManagerPlatform, PeerNode, PeerStorePlatform, PeerType}
 import jbok.core.pool.{BlockPool, BlockPoolConfig, OmmerPool, TxPool}
 import jbok.core.sync._
-import jbok.crypto.signature.ecdsa.SecP256k1
-import jbok.crypto.signature.{ECDSA, Signature}
+import jbok.crypto.signature.{ECDSA, KeyPair, Signature}
 import jbok.crypto.testkit._
+import jbok.network.transport.UdpTransport
 import jbok.persistent.KeyValueDB
+import jbok.persistent.testkit._
 import org.scalacheck._
 import scodec.bits.ByteVector
+import jbok.core.config.reference
 
 import scala.concurrent.duration._
 
 final case class Fixture(
-    chainId: Int,
+    cId: Int,
     port: Int,
     miner: SimAccount,
     genesisConfig: GenesisConfig,
     consensusAlgo: String
 ) {
+  implicit val chainId: BigInt = cId
+
   def consensus: IO[Consensus[IO]] = consensusAlgo match {
     case "clique" =>
       for {
         db        <- KeyValueDB.inmem[IO]
-        history   <- History[IO](db, chainId)
-        _         <- history.init(genesisConfig)
+        history   <- History[IO](db)
+        _         <- history.initGenesis(genesisConfig)
         blockPool <- BlockPool[IO](history, BlockPoolConfig())
         cliqueConfig = CliqueConfig(period = 100.millis)
-        clique <- Clique[IO](cliqueConfig, history, miner.keyPair)
+        clique <- Clique[IO](cliqueConfig, genesisConfig, history, miner.keyPair)
       } yield new CliqueConsensus[IO](clique, blockPool)
 //
 //    case "ethash" =>
@@ -59,22 +66,23 @@ final case class Fixture(
 object testkit {
   def defaultFixture(port: Int = 10001, algo: String = "clique"): Fixture = cliqueFixture(port)
 
-  def cliqueFixture(port: Int): Fixture = {
-    val chainId = 0
-    val miner   = SimAccount(Signature[ECDSA].generateKeyPair().unsafeRunSync(), BigInt("1000000000000000000000000"), 0)
-    val alloc   = Map(miner.address.toString -> miner.balance.toString())
-    val genesisConfig =
-      GenesisConfig.default.copy(alloc = alloc, extraData = Clique.fillExtraData(miner.address :: Nil).toHex)
+  implicit val chainId: BigInt = 1
 
-    Fixture(chainId, port, miner, genesisConfig, "clique")
+  def cliqueFixture(port: Int): Fixture = {
+    val miner =
+      SimAccount(Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync(), BigInt("1000000000000000000000000"), 0)
+    val alloc = Map(miner.address.toString -> miner.balance.toString())
+    val genesisConfig =
+      reference.genesis.copy(alloc = alloc, extraData = Clique.fillExtraData(miner.address :: Nil))
+
+    Fixture(chainId.toInt, port, miner, genesisConfig, "clique")
   }
 
   def fixture(port: Int): Fixture = {
-    val chainId       = 0
-    val miner         = SimAccount(Signature[ECDSA].generateKeyPair().unsafeRunSync(), BigInt("100000000000000000000"), 0)
+    val miner         = SimAccount(Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync(), BigInt("100000000000000000000"), 0)
     val alloc         = Map(miner.address.toString -> miner.balance.toString())
-    val genesisConfig = GenesisConfig.default.copy(alloc = alloc)
-    Fixture(chainId, port, miner, genesisConfig, "ethash")
+    val genesisConfig = reference.genesis.copy(alloc = alloc)
+    Fixture(chainId.toInt, port, miner, genesisConfig, "ethash")
   }
 
   implicit val arbUint256 = Arbitrary {
@@ -115,8 +123,8 @@ object testkit {
   implicit val arbSignedTransaction: Arbitrary[SignedTransaction] = Arbitrary {
     for {
       tx <- arbTransaction.arbitrary
-      keyPair = Signature[ECDSA].generateKeyPair().unsafeRunSync()
-      stx     = SignedTransaction.sign(tx, keyPair, 0)
+      keyPair = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
+      stx     = SignedTransaction.sign[IO](tx, keyPair).unsafeRunSync()
     } yield stx
   }
 
@@ -128,7 +136,7 @@ object testkit {
       stateRoot        <- genBoundedByteVector(32, 32)
       transactionsRoot <- genBoundedByteVector(32, 32)
       receiptsRoot     <- genBoundedByteVector(32, 32)
-      logsBloom        <- genBoundedByteVector(50, 50)
+      logsBloom        <- genBoundedByteVector(256, 256)
       difficulty       <- bigIntGen
       number           <- bigIntGen
       gasLimit         <- bigIntGen
@@ -191,7 +199,7 @@ object testkit {
   }
 
   implicit def arbPeerManager(implicit fixture: Fixture): Arbitrary[PeerManager[IO]] = Arbitrary {
-    genPeerManager(PeerManagerConfig(fixture.port))
+    genPeerManager(reference.peer.copy(port = fixture.port))
   }
 
   def genTxPool(config: TxPoolConfig = TxPoolConfig())(implicit fixture: Fixture): Gen[TxPool[IO]] = {
@@ -204,8 +212,8 @@ object testkit {
   }
 
   def genStatus(number: BigInt = 0,
-                chainId: Int = 0,
-                genesisHash: ByteVector = GenesisConfig.default.header.hash): Gen[Status] =
+                chainId: BigInt = reference.genesis.chainId,
+                genesisHash: ByteVector = reference.genesis.header.hash): Gen[Status] =
     Gen.delay(Status(chainId, genesisHash, number))
 
   def genPeer: Gen[Peer[IO]] =
@@ -237,22 +245,6 @@ object testkit {
 
   implicit val arbNewBlockHashes: Arbitrary[NewBlockHashes] = Arbitrary(genNewBlockHashes)
 
-//  def genBlockHandler(port: Int = 1000)(implicit fixture: Fixture): Gen[BlockHandler[IO]] = {
-//    val consensus        = fixture.consensus.unsafeRunSync()
-//    val blockChainConfig = BlockChainConfig()
-//    val history          = consensus.history
-//    val executor         = BlockExecutor[IO](blockChainConfig, consensus)
-//    val syncConfig       = SyncConfig()
-//    val txPool           = TxPool[IO](TxPoolConfig()).unsafeRunSync()
-//    val ommerPool        = OmmerPool[IO](history).unsafeRunSync()
-//    val blockHandler     = BlockHandler[IO](syncConfig, executor, txPool, ommerPool)
-//    blockHandler
-//  }
-//
-//  implicit def arbBlockHandler(implicit fixture: Fixture): Arbitrary[BlockHandler[IO]] = Arbitrary {
-//    genBlockHandler()
-//  }
-
   def genTxs(min: Int = 0, max: Int = 1024)(implicit fixture: Fixture): Gen[List[SignedTransaction]] =
     for {
       size <- Gen.chooseNum(min, max)
@@ -266,7 +258,7 @@ object testkit {
 
   def genBlockMiner(implicit fixture: Fixture): Gen[BlockMiner[IO]] = {
     val sm    = random[SyncManager[IO]]
-    val miner = BlockMiner[IO](MiningConfig(), sm).unsafeRunSync()
+    val miner = BlockMiner[IO](reference.mining, sm).unsafeRunSync()
     miner
   }
 
@@ -291,9 +283,10 @@ object testkit {
       mined = miner.mine1(parentOpt, stxsOpt, ommersOpt).unsafeRunSync()
     } yield mined.block
 
-  def genPeerManager(config: PeerManagerConfig)(implicit fixture: Fixture): Gen[PeerManager[IO]] = {
-    val keyPair = Signature[ECDSA].generateKeyPair().unsafeRunSync()
-    val history = fixture.consensus.unsafeRunSync().history
+  def genPeerManager(config: PeerConfig)(implicit fixture: Fixture): Gen[PeerManager[IO]] = {
+    implicit val chainId: BigInt = fixture.cId
+    val keyPair                  = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
+    val history                  = fixture.consensus.unsafeRunSync().history
     PeerManagerPlatform[IO](config, Some(keyPair), history).unsafeRunSync()
   }
 
@@ -324,22 +317,50 @@ object testkit {
 
   implicit def arbBlockExecutor(implicit fixture: Fixture): Arbitrary[BlockExecutor[IO]] = Arbitrary {
     val consensus = fixture.consensus.unsafeRunSync()
-    val keyPair   = Signature[ECDSA].generateKeyPair().unsafeRunSync()
-    val pm        = PeerManagerPlatform[IO](PeerManagerConfig(fixture.port), Some(keyPair), consensus.history).unsafeRunSync()
-    BlockExecutor[IO](BlockChainConfig(), consensus, pm).unsafeRunSync()
+    val keyPair   = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
+    val pm = PeerManagerPlatform[IO](reference.peer.copy(port = fixture.port), Some(keyPair), consensus.history)
+      .unsafeRunSync()
+    BlockExecutor[IO](reference.history, consensus, pm).unsafeRunSync()
   }
 
-  def genFullSync(config: SyncConfig = SyncConfig())(implicit fixture: Fixture): Gen[FullSync[IO]] = {
+  def genFullSync(config: SyncConfig = reference.sync)(implicit fixture: Fixture): Gen[FullSync[IO]] = {
     val executor = random[BlockExecutor[IO]]
     FullSync[IO](config, executor).unsafeRunSync()
   }
 
-  def genSyncManager(config: SyncConfig = SyncConfig())(implicit fixture: Fixture): Gen[SyncManager[IO]] = {
+  def genSyncManager(config: SyncConfig = reference.sync)(implicit fixture: Fixture): Gen[SyncManager[IO]] = {
     val executor = random[BlockExecutor[IO]]
     SyncManager[IO](config, executor).unsafeRunSync()
   }
 
   implicit def arbSyncManager(implicit fixture: Fixture): Arbitrary[SyncManager[IO]] = Arbitrary {
     genSyncManager()
+  }
+
+  def genDiscovery(port: Int): Gen[Discovery[IO]] = {
+    val config         = reference.peer.copy(discoveryPort = port)
+    val (transport, _) = UdpTransport[IO](config.discoveryAddr).allocated.unsafeRunSync()
+    val keyPair        = random[KeyPair]
+    val db             = random[KeyValueDB[IO]]
+    val store          = PeerStorePlatform.fromKV(db)
+    Discovery[IO](config, transport, keyPair, store).unsafeRunSync()
+  }
+
+  def genPeerTable: Gen[PeerTable[IO]] = {
+    val peerNode = PeerNode(random[KeyPair].public, "localhost", 10000, 0, PeerType.Trusted)
+    val db       = random[KeyValueDB[IO]]
+    val store    = PeerStorePlatform.fromKV(db)
+    PeerTable(peerNode, store, Vector.empty).unsafeRunSync()
+  }
+
+  implicit val arbPeerTable: Arbitrary[PeerTable[IO]] = Arbitrary {
+    genPeerTable
+  }
+
+  implicit val arbPeerNode: Arbitrary[PeerNode] = Arbitrary {
+    for {
+      port <- Gen.chooseNum(10000, 60000)
+      kp = random[KeyPair]
+    } yield PeerNode(kp.public, "localhost", port, 0, PeerType.Trusted)
   }
 }

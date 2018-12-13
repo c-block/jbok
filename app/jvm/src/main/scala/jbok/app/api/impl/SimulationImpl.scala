@@ -5,11 +5,11 @@ import cats.effect.concurrent.Ref
 import cats.effect.{ConcurrentEffect, IO, Timer}
 import cats.implicits._
 import fs2.concurrent.Topic
-import jbok.app.FullNode
 import jbok.app.simulations.SimulationImpl.NodeId
+import jbok.app.{ConfigGenerator, FullNode}
 import jbok.common.execution._
 import jbok.core.config.Configs.FullNodeConfig
-import jbok.core.config.GenesisConfig
+import jbok.core.config.reference
 import jbok.core.consensus.Consensus
 import jbok.core.consensus.poa.clique.{Clique, CliqueConfig, CliqueConsensus}
 import jbok.core.ledger.History
@@ -31,8 +31,10 @@ class SimulationImpl(
 ) extends SimulationAPI {
   private[this] val log = org.log4s.getLogger
 
-  val cliqueConfig = CliqueConfig(period = 5.seconds)
-  val txGraphGen   = new TxGraphGen(10)
+  val cliqueConfig     = CliqueConfig(period = 5.seconds)
+  val genesisConfig    = reference.genesis
+  implicit val chainId = genesisConfig.chainId
+  val txGraphGen       = new TxGraphGen(10)
 
   private def infoFromNode(fullNode: FullNode[IO]): NodeInfo =
     NodeInfo(fullNode.id, fullNode.config.peer.host, fullNode.config.peer.port, fullNode.config.rpc.port)
@@ -44,31 +46,28 @@ class SimulationImpl(
     FullNode.forConfigAndConsensus(config, consensus)
 
   override def createNodesWithMiner(n: Int, m: Int): IO[List[NodeInfo]] = {
-    log.info("in createNodes")
-    val fullNodeConfigs = FullNodeConfig.fill(n)
+    val fullNodeConfigs = ConfigGenerator.fill(n)
     val signers = (1 to n).toList
-      .traverse[IO, KeyPair](_ => Signature[ECDSA].generateKeyPair())
+      .traverse[IO, KeyPair](_ => Signature[ECDSA].generateKeyPair[IO]())
       .unsafeRunSync()
     val (configs, minerSingers) = selectMiner(n, m, fullNodeConfigs, signers)
 
     log.info(minerSingers.toString)
-    val genesisConfig =
-      GenesisConfig.default
-        .copy(alloc = txGraphGen.alloc,
-              extraData = Clique.fillExtraData(minerSingers.map(Address(_))).toHex,
-              timestamp = System.currentTimeMillis())
+    val newGenesisConfig =
+      genesisConfig
+        .copy(alloc = txGraphGen.alloc, extraData = Clique.fillExtraData(minerSingers.map(Address(_))))
     log.info(s"create ${n} node(s)")
 
     for {
       newNodes <- configs.zipWithIndex.traverse[IO, FullNode[IO]] {
         case (config, idx) =>
           implicit val ec =
-            ExecutionContext.fromExecutor(Executors.newFixedThreadPool(2, mkThreadFactory(s"EC${idx}", true)))
+            ExecutionContext.fromExecutor(Executors.newFixedThreadPool(2, namedThreadFactory(s"EC${idx}", true)))
           for {
             db        <- KeyValueDB.inmem[IO]
             history   <- History[IO](db)
-            _         <- history.init(genesisConfig)
-            clique    <- Clique[IO](cliqueConfig, history, signers(idx))
+            _         <- history.initGenesis(newGenesisConfig)
+            clique    <- Clique[IO](cliqueConfig, genesisConfig, history, signers(idx))
             blockPool <- BlockPool(history)
             consensus = new CliqueConsensus[IO](clique, blockPool)
             fullNode <- newFullNode(config, consensus)

@@ -3,7 +3,7 @@ package jbok.app.api.impl
 import cats.effect.IO
 import cats.effect.concurrent.Ref
 import jbok.app.api.{PrivateAPI, TransactionRequest}
-import jbok.core.config.Configs.BlockChainConfig
+import jbok.core.config.Configs.HistoryConfig
 import jbok.core.keystore.{KeyStorePlatform, Wallet}
 import jbok.core.ledger.History
 import jbok.core.models.Address
@@ -20,13 +20,13 @@ object PrivateApiImpl {
   def apply(
       keyStore: KeyStorePlatform[IO],
       history: History[IO],
-      blockChainConfig: BlockChainConfig,
+      blockChainConfig: HistoryConfig,
       txPool: TxPool[IO],
-  ): IO[PrivateAPI] =
+  )(implicit chainId: BigInt): IO[PrivateAPI[IO]] =
     for {
       unlockedWallets <- Ref.of[IO, Map[Address, Wallet]](Map.empty)
     } yield
-      new PrivateAPI {
+      new PrivateAPI[IO] {
         override def importRawKey(privateKey: ByteVector, passphrase: String): IO[Address] =
           keyStore.importPrivateKey(privateKey, passphrase)
 
@@ -34,7 +34,7 @@ object PrivateApiImpl {
           keyStore.newAccount(passphrase)
 
         override def delAccount(address: Address): IO[Boolean] =
-          keyStore.deleteWallet(address)
+          keyStore.deleteAccount(address)
 
         override def listAccounts: IO[List[Address]] =
           keyStore.listAccounts
@@ -55,13 +55,13 @@ object PrivateApiImpl {
             } else {
               unlockedWallets.get.map(_(address))
             }
-            sig <- Signature[ECDSA].sign(getMessageToSign(message).toArray, wallet.keyPair)
+            sig <- Signature[ECDSA].sign[IO](getMessageToSign(message).toArray, wallet.keyPair, chainId)
           } yield sig
 
         override def ecRecover(message: ByteVector, signature: CryptoSignature): IO[Address] =
           IO {
             Signature[ECDSA]
-              .recoverPublic(getMessageToSign(message).toArray, signature)
+              .recoverPublic(getMessageToSign(message).toArray, signature, chainId)
               .map(public => Address(public.bytes.kec256))
               .get
           }
@@ -86,7 +86,7 @@ object PrivateApiImpl {
         override def deleteWallet(address: Address): IO[Boolean] =
           for {
             _ <- unlockedWallets.update(_ - address)
-            r <- keyStore.deleteWallet(address)
+            r <- keyStore.deleteAccount(address)
           } yield r
 
         override def changePassphrase(address: Address, oldPassphrase: String, newPassphrase: String): IO[Boolean] =
@@ -108,8 +108,8 @@ object PrivateApiImpl {
             currentNonceOpt <- history.getAccount(request.from, bn).map(_.map(_.nonce.toBigInt))
             maybeNextTxNonce = latestNonceOpt.map(_ + 1).orElse(currentNonceOpt)
             tx               = request.toTransaction(maybeNextTxNonce.getOrElse(blockChainConfig.accountStartNonce))
-            stx              = wallet.signTx(tx, blockChainConfig.chainId)
-            _ <- txPool.addOrUpdateTransaction(stx)
+            stx <- wallet.signTx[IO](tx)
+            _   <- txPool.addOrUpdateTransaction(stx)
           } yield stx.hash
       }
 }

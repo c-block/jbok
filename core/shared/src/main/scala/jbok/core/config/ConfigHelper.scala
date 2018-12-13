@@ -5,8 +5,29 @@ import com.typesafe.config._
 import scala.collection.JavaConverters._
 
 object ConfigHelper {
-  val minCellLen = 20
-  val maxCellLen = 60
+  val minCellLen = 16
+  val maxCellLen = 48
+
+  private val system = ConfigFactory.systemProperties()
+
+  private val resource = ConfigFactory.parseResources("reference.conf")
+
+  val reference: Config =
+    resource
+      .resolveWith(resource.withFallback(system))
+      .getConfig("jbok")
+
+  def overrideWith(config: Config): Config =
+    config
+      .withFallback(resource.resolveWith(config.withFallback(resource).withFallback(system)))
+      .getConfig("jbok")
+
+  private def pad(str: String, maxLen: Int): String =
+    if (str.length > maxLen) {
+      s"${str.take(maxLen - 3)}..."
+    } else {
+      s"${str.padTo(maxLen, ' ')}"
+    }
 
   final case class Help(rows: List[ConfigItem]) {
     def render: String =
@@ -21,22 +42,24 @@ object ConfigHelper {
   }
 
   final case class ConfigGroup(key: String, items: List[ConfigItem]) {
-    val maxNameLen  = items.map(_.name.length).max max minCellLen min maxCellLen
-    val maxValueLen = items.map(_.value.length).max max minCellLen min maxCellLen
-    val maxDescLen  = items.map(_.desc.length).max max minCellLen min maxCellLen
+    val maxNameLen   = items.map(_.name.length).max max minCellLen min maxCellLen
+    val maxValueLen  = items.map(_.value.length).max max minCellLen min maxCellLen
+    val maxDescLen   = items.map(_.desc.length).max max minCellLen min maxCellLen
+    val maxOriginLen = items.map(_.origin.length).max max minCellLen min maxCellLen
 
     def render: String = {
       val header = List(
-        s"${key} config".padTo(maxNameLen, ' '),
-        "value".padTo(maxValueLen, ' '),
-        "description".padTo(maxDescLen, ' ')
+        pad(s"${key} config", maxNameLen),
+        pad("value", maxValueLen),
+        pad("description", maxDescLen),
+        pad("origin", maxOriginLen),
       ).mkString("| ", " | ", " |")
       val hr = "+" + ("-" * (header.length - 2)) + "+"
       val sb = StringBuilder.newBuilder
       sb ++= hr + "\n"
       sb ++= header + "\n"
       sb ++= hr + "\n"
-      sb ++= items.map(_.render(maxNameLen, maxValueLen, maxDescLen)).mkString("\n") + "\n"
+      sb ++= items.map(_.render(maxNameLen, maxValueLen, maxDescLen, maxOriginLen)).mkString("\n") + "\n"
       sb ++= hr + "\n"
       sb.mkString
     }
@@ -48,11 +71,12 @@ object ConfigHelper {
       case xs          => NonEmptyList.fromListUnsafe(xs.toList)
     }
 
-    def render(maxNameLen: Int, maxValueLen: Int, maxDescLen: Int): String =
+    def render(maxNameLen: Int, maxValueLen: Int, maxDescLen: Int, maxOriginLen: Int): String =
       List(
-        name.padTo(maxNameLen, ' '),
-        value.padTo(maxValueLen, ' '),
-        desc.padTo(maxDescLen, ' ')
+        pad(name, maxNameLen),
+        pad(value, maxValueLen),
+        pad(desc, maxDescLen),
+        pad(origin, maxOriginLen)
       ).mkString("| ", " | ", " |")
   }
 
@@ -72,7 +96,7 @@ object ConfigHelper {
             if (value.valueType() == ConfigValueType.NULL) ""
             else value.render(ConfigRenderOptions.concise().setJson(false)),
             value.origin().comments().asScala.mkString(" ").trim,
-            value.origin().description()
+            value.origin().description().split("@").head
           ) :: acc
       }
 
@@ -81,17 +105,22 @@ object ConfigHelper {
   }
 
   def parseConfig(args: List[String]): Either[Throwable, Config] = {
-    val strings = args.sliding(2).toList.map {
+    val pairs = args.grouped(2).toList.map {
       case List(key, _) if !key.startsWith("-") =>
-        throw new Exception(s"${key} must start with '-'")
+        throw new Exception(s"$key {key} must start with '-'")
 
       case List(key) =>
-        throw new Exception(s"${key} no value provided")
+        throw new Exception(s"key ${key} has no value")
 
       case List(key, value) =>
-        s"${key.drop(1)}=${value}"
+        s"jbok.${key.drop(1)}=${value}"
     }
 
-    Right(ConfigFactory.parseString(strings.mkString, ConfigParseOptions.defaults().setOriginDescription("cmdline")))
+    Right(
+      ConfigFactory.parseString(
+        pairs.mkString("\n"),
+        ConfigParseOptions.defaults().setOriginDescription("command line")
+      )
+    )
   }
 }

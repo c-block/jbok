@@ -1,40 +1,25 @@
 package jbok.app.api.impl
 
-import java.time.Duration
-import java.util.Date
-
 import cats.data.OptionT
 import cats.effect.IO
-import cats.effect.concurrent.Ref
 import cats.implicits._
 import jbok.app.api._
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.implicits._
-import jbok.core.ledger.History
-import jbok.core.config.Configs.{BlockChainConfig, MiningConfig}
-import jbok.core.keystore.KeyStore
+import jbok.core.config.Configs.HistoryConfig
 import jbok.core.mining.BlockMiner
 import jbok.core.models._
-import jbok.crypto.signature.CryptoSignature
 import scodec.bits.ByteVector
 
-class PublicApiImpl(
-    blockChainConfig: BlockChainConfig,
-    miningConfig: MiningConfig,
-    miner: BlockMiner[IO],
-    keyStore: KeyStore[IO],
-    version: Int,
-    hashRate: Ref[IO, Map[ByteVector, (BigInt, Date)]],
-    lastActive: Ref[IO, Option[Date]]
-) extends PublicAPI {
+final class PublicApiImpl(
+    historyConfig: HistoryConfig,
+    miner: BlockMiner[IO]
+) extends PublicAPI[IO] {
 
   val history   = miner.history
   val txPool    = miner.executor.txPool
   val ommerPool = miner.executor.ommerPool
   val blockPool = miner.executor.blockPool
-
-  override def protocolVersion: IO[String] =
-    IO.pure(f"0x${version}%x")
 
   override def bestBlockNumber: IO[BigInt] =
     history.getBestBlockNumber
@@ -81,7 +66,7 @@ class PublicApiImpl(
     x.value
   }
 
-  override def getUncleByBlockHashAndIndex(blockHash: ByteVector, uncleIndex: Int): IO[Option[BlockHeader]] = {
+  override def getOmmerByBlockHashAndIndex(blockHash: ByteVector, uncleIndex: Int): IO[Option[BlockHeader]] = {
     val x = for {
       block <- OptionT(history.getBlockByHash(blockHash))
       uncle <- OptionT.fromOption[IO](block.body.ommerList.lift(uncleIndex))
@@ -90,7 +75,7 @@ class PublicApiImpl(
     x.value
   }
 
-  override def getUncleByBlockNumberAndIndex(blockParam: BlockParam, uncleIndex: Int): IO[Option[BlockHeader]] = {
+  override def getOmmerByBlockNumberAndIndex(blockParam: BlockParam, uncleIndex: Int): IO[Option[BlockHeader]] = {
     val x = for {
       block <- OptionT.liftF(resolveBlock(blockParam))
       uncle <- OptionT.fromOption[IO](block.body.ommerList.lift(uncleIndex))
@@ -98,13 +83,6 @@ class PublicApiImpl(
 
     x.value
   }
-
-  override def submitHashRate(hr: BigInt, id: ByteVector): IO[Boolean] =
-    for {
-      _ <- reportActive
-      now = new Date
-      _ <- hashRate.update(m => removeObsoleteHashrates(now, m + (id -> (hr, now))))
-    } yield true
 
   override def getGasPrice: IO[BigInt] = {
     val blockDifference = BigInt(30)
@@ -122,26 +100,6 @@ class PublicApiImpl(
   }
 
   override def isMining: IO[Boolean] = miner.haltWhenTrue.get.map(!_)
-
-  override def getCoinbase: IO[Address] = miningConfig.coinbase.pure[IO]
-
-  override def syncing: IO[Option[SyncingStatus]] =
-    for {
-      currentBlock  <- history.getBestBlockNumber
-      highestBlock  <- history.getEstimatedHighestBlock
-      startingBlock <- history.getSyncStartingBlock
-    } yield {
-      if (currentBlock < highestBlock) {
-        Some(
-          SyncingStatus(
-            startingBlock,
-            currentBlock,
-            highestBlock
-          ))
-      } else {
-        None
-      }
-    }
 
   override def sendRawTransaction(data: ByteVector): IO[ByteVector] = {
     val stx = RlpCodec.decode[SignedTransaction](data.bits).require.value
@@ -166,16 +124,16 @@ class PublicApiImpl(
   override def getCode(address: Address, blockParam: BlockParam): IO[ByteVector] =
     for {
       block <- resolveBlock(blockParam)
-      world <- history.getWorldState(blockChainConfig.accountStartNonce, Some(block.header.stateRoot))
+      world <- history.getWorldState(historyConfig.accountStartNonce, Some(block.header.stateRoot))
       code  <- world.getCode(address)
     } yield code
 
-  override def getUncleCountByBlockNumber(blockParam: BlockParam): IO[Int] =
+  override def getOmmerCountByBlockNumber(blockParam: BlockParam): IO[Int] =
     for {
       block <- resolveBlock(blockParam)
     } yield block.body.ommerList.length
 
-  override def getUncleCountByBlockHash(blockHash: ByteVector): IO[Int] =
+  override def getOmmerCountByBlockHash(blockHash: ByteVector): IO[Int] =
     for {
       body <- history.getBlockBodyByHash(blockHash)
     } yield body.map(_.ommerList.length).getOrElse(-1)
@@ -243,7 +201,7 @@ class PublicApiImpl(
     for {
       gasLimit <- getGasLimit(callTx, blockParam)
       tx = Transaction(0, callTx.gasPrice, gasLimit, callTx.to, callTx.value, callTx.data)
-    } yield SignedTransaction(tx, history.chainId.toByte, 0.toByte, ByteVector(0), ByteVector(0))
+    } yield SignedTransaction(tx, 0.toByte, ByteVector(0), ByteVector(0))
 
   private[jbok] def getGasLimit(callTx: CallTx, blockParam: BlockParam): IO[BigInt] =
     if (callTx.gas.isDefined) {
@@ -252,24 +210,12 @@ class PublicApiImpl(
       resolveBlock(BlockParam.Latest).map(_.header.gasLimit)
     }
 
-  private[jbok] def removeObsoleteHashrates(now: Date,
-                                            rates: Map[ByteVector, (BigInt, Date)]): Map[ByteVector, (BigInt, Date)] =
-    rates.filter {
-      case (_, (_, reported)) =>
-        Duration.between(reported.toInstant, now.toInstant).toMillis < miningConfig.activeTimeout.toMillis
-    }
-
-  private[jbok] def reportActive: IO[Unit] = {
-    val now = new Date()
-    lastActive.update(_ => Some(now))
-  }
-
   private[jbok] def resolveAccount(address: Address, blockParam: BlockParam): IO[Account] =
     for {
       block <- resolveBlock(blockParam)
       account <- history
         .getAccount(address, block.header.number)
-        .map(_.getOrElse(Account.empty(blockChainConfig.accountStartNonce)))
+        .map(_.getOrElse(Account.empty(historyConfig.accountStartNonce)))
     } yield account
 
   private[jbok] def resolveBlock(blockParam: BlockParam): IO[Block] = {
@@ -284,26 +230,6 @@ class PublicApiImpl(
 }
 
 object PublicApiImpl {
-  def apply(
-      blockChain: History[IO],
-      blockChainConfig: BlockChainConfig,
-      miningConfig: MiningConfig,
-      miner: BlockMiner[IO],
-      keyStore: KeyStore[IO],
-      version: Int,
-  ): IO[PublicAPI] =
-    for {
-      hashRate   <- Ref.of[IO, Map[ByteVector, (BigInt, Date)]](Map.empty)
-      lastActive <- Ref.of[IO, Option[Date]](None)
-    } yield {
-      new PublicApiImpl(
-        blockChainConfig,
-        miningConfig: MiningConfig,
-        miner,
-        keyStore,
-        version: Int,
-        hashRate,
-        lastActive
-      )
-    }
+  def apply(historyConfig: HistoryConfig, miner: BlockMiner[IO]): PublicAPI[IO] =
+    new PublicApiImpl(historyConfig, miner)
 }

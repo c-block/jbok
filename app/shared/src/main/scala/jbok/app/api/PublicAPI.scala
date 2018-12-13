@@ -1,22 +1,26 @@
 package jbok.app.api
 
-import cats.effect.IO
 import io.circe.generic.JsonCodec
 import jbok.core.models._
 import scodec.bits.ByteVector
 import jbok.codec.json.implicits._
 
-@JsonCodec
-case class GetWorkResponse(powHeaderHash: ByteVector, dagSeed: ByteVector, target: ByteVector)
+import scala.scalajs.js.annotation.{JSExportAll, JSExportTopLevel}
 
 @JsonCodec
 sealed trait BlockParam
+
 object BlockParam {
+  @JSExportTopLevel("BlockParam.WithNumber")
+  @JSExportAll
   case class WithNumber(n: BigInt) extends BlockParam
-  case object Latest               extends BlockParam
-  case object Earliest             extends BlockParam
+  @JSExportTopLevel("BlockParam.Latest")
+  case object Latest extends BlockParam
+  @JSExportTopLevel("BlockParam.Earliest")
+  case object Earliest extends BlockParam
 }
 
+@JSExportAll
 @JsonCodec
 case class CallTx(
     from: Option[Address],
@@ -27,63 +31,52 @@ case class CallTx(
     data: ByteVector
 )
 
-@JsonCodec
-case class SyncingStatus(startingBlock: BigInt, currentBlock: BigInt, highestBlock: BigInt)
+trait PublicAPI[F[_]] {
+  def bestBlockNumber: F[BigInt]
 
-trait PublicAPI {
-  def protocolVersion: IO[String]
+  def getBlockTransactionCountByHash(blockHash: ByteVector): F[Option[Int]]
 
-  def bestBlockNumber: IO[BigInt]
+  def getBlockByHash(blockHash: ByteVector): F[Option[Block]]
 
-  def getBlockTransactionCountByHash(blockHash: ByteVector): IO[Option[Int]]
+  def getBlockByNumber(blockNumber: BigInt): F[Option[Block]]
 
-  def getBlockByHash(blockHash: ByteVector): IO[Option[Block]]
+  def getTransactionByHash(txHash: ByteVector): F[Option[SignedTransaction]]
 
-  def getBlockByNumber(blockNumber: BigInt): IO[Option[Block]]
+  def getTransactionReceipt(txHash: ByteVector): F[Option[Receipt]]
 
-  def getTransactionByHash(txHash: ByteVector): IO[Option[SignedTransaction]]
+  def getTransactionByBlockHashAndIndexRequest(blockHash: ByteVector, txIndex: Int): F[Option[SignedTransaction]]
 
-  def getTransactionReceipt(txHash: ByteVector): IO[Option[Receipt]]
+  def getOmmerByBlockHashAndIndex(blockHash: ByteVector, ommerIndex: Int): F[Option[BlockHeader]]
 
-  def getTransactionByBlockHashAndIndexRequest(blockHash: ByteVector, txIndex: Int): IO[Option[SignedTransaction]]
+  def getOmmerByBlockNumberAndIndex(blockParam: BlockParam, ommerIndex: Int): F[Option[BlockHeader]]
 
-  def getUncleByBlockHashAndIndex(blockHash: ByteVector, uncleIndex: Int): IO[Option[BlockHeader]]
+  def getGasPrice: F[BigInt]
 
-  def getUncleByBlockNumberAndIndex(blockParam: BlockParam, uncleIndex: Int): IO[Option[BlockHeader]]
+  def isMining: F[Boolean]
 
-  def submitHashRate(hashRate: BigInt, id: ByteVector): IO[Boolean]
+  def sendRawTransaction(data: ByteVector): F[ByteVector]
 
-  def getGasPrice: IO[BigInt]
+  def call(callTx: CallTx, blockParam: BlockParam): F[ByteVector]
 
-  def isMining: IO[Boolean]
+  def estimateGas(callTx: CallTx, blockParam: BlockParam): F[BigInt]
 
-  def getCoinbase: IO[Address]
+  def getCode(address: Address, blockParam: BlockParam): F[ByteVector]
 
-  def syncing: IO[Option[SyncingStatus]]
+  def getOmmerCountByBlockNumber(blockParam: BlockParam): F[Int]
 
-  def sendRawTransaction(data: ByteVector): IO[ByteVector]
+  def getOmmerCountByBlockHash(blockHash: ByteVector): F[Int]
 
-  def call(callTx: CallTx, blockParam: BlockParam): IO[ByteVector]
+  def getBlockTransactionCountByNumber(blockParam: BlockParam): F[Int]
 
-  def estimateGas(callTx: CallTx, blockParam: BlockParam): IO[BigInt]
+  def getTransactionByBlockNumberAndIndexRequest(blockParam: BlockParam, txIndex: Int): F[Option[SignedTransaction]]
 
-  def getCode(address: Address, blockParam: BlockParam): IO[ByteVector]
+  def getAccount(address: Address, blockParam: BlockParam): F[Account]
 
-  def getUncleCountByBlockNumber(blockParam: BlockParam): IO[Int]
+  def getBalance(address: Address, blockParam: BlockParam): F[BigInt]
 
-  def getUncleCountByBlockHash(blockHash: ByteVector): IO[Int]
+  def getStorageAt(address: Address, position: BigInt, blockParam: BlockParam): F[ByteVector]
 
-  def getBlockTransactionCountByNumber(blockParam: BlockParam): IO[Int]
+  def getTransactionCount(address: Address, blockParam: BlockParam): F[BigInt]
 
-  def getTransactionByBlockNumberAndIndexRequest(blockParam: BlockParam, txIndex: Int): IO[Option[SignedTransaction]]
-
-  def getAccount(address: Address, blockParam: BlockParam): IO[Account]
-
-  def getBalance(address: Address, blockParam: BlockParam): IO[BigInt]
-
-  def getStorageAt(address: Address, position: BigInt, blockParam: BlockParam): IO[ByteVector]
-
-  def getTransactionCount(address: Address, blockParam: BlockParam): IO[BigInt]
-
-  def getAccountTransactions(address: Address, fromBlock: BigInt, toBlock: BigInt): IO[List[SignedTransaction]]
+  def getAccountTransactions(address: Address, fromBlock: BigInt, toBlock: BigInt): F[List[SignedTransaction]]
 }

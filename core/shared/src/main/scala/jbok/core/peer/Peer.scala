@@ -1,7 +1,7 @@
 package jbok.core.peer
 
 import cats.effect.concurrent.{Deferred, Ref}
-import cats.effect.{ConcurrentEffect, Sync}
+import cats.effect.{ConcurrentEffect, ContextShift, Sync}
 import cats.implicits._
 import fs2._
 import fs2.concurrent.{Queue, SignallingRef}
@@ -29,7 +29,7 @@ case class Peer[F[_]](
     knownTxs.get.map(_.contains(stxs))
 
   def markBlock(blockHash: ByteVector): F[Unit] =
-    knownBlocks.update(s => if (s.size >= MaxKnownBlocks) s.take(MaxKnownBlocks - 1) + blockHash else s + blockHash)
+    knownBlocks.update(s => s.take(MaxKnownBlocks - 1) + blockHash)
 
   def markTxs(stxs: SignedTransactions): F[Unit] =
     knownTxs.update(known => known.take(MaxKnownTxs - 1) + stxs)
@@ -46,7 +46,7 @@ object Peer {
       knownTxs    <- Ref.of[F, Set[SignedTransactions]](Set.empty)
     } yield Peer[F](pk, conn, status, knownBlocks, knownTxs)
 
-  def dummy[F[_]: ConcurrentEffect](pk: KeyPair.Public, status: Status): F[Peer[F]] =
+  def dummy[F[_]: ConcurrentEffect](pk: KeyPair.Public, status: Status)(implicit CS: ContextShift[F]): F[Peer[F]] =
     for {
       in           <- Queue.bounded[F, Message](1)
       out          <- Queue.bounded[F, Message](1)

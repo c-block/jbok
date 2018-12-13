@@ -6,10 +6,12 @@ import jbok.common.execution._
 import jbok.core.config.GenesisConfig
 import jbok.core.ledger.History
 import jbok.core.models.{Address, BlockHeader}
-import jbok.crypto.signature.KeyPair
-import jbok.crypto.signature.ecdsa.SecP256k1
+import jbok.crypto.signature.{ECDSA, KeyPair, Signature}
 import jbok.persistent.KeyValueDB
 import scodec.bits.ByteVector
+import jbok.common.testkit._
+import jbok.core.testkit._
+import jbok.core.config.reference
 
 import scala.collection.mutable
 
@@ -23,11 +25,12 @@ case class Test(signers: List[String], votes: List[TestVote], results: List[Stri
 
 trait SnapshotFixture {
   def mkHistory(signers: List[Address]) = {
-    val extra   = Clique.fillExtraData(signers)
-    val config = GenesisConfig.default.copy(extraData = extra.toHex)
-    val db      = KeyValueDB.inmem[IO].unsafeRunSync()
-    val history = History[IO](db).unsafeRunSync()
-    history.init(config).unsafeRunSync()
+    val extra            = Clique.fillExtraData(signers)
+    val config           = reference.genesis.copy(extraData = extra)
+    implicit val chainId = config.chainId
+    val db               = KeyValueDB.inmem[IO].unsafeRunSync()
+    val history          = History[IO](db).unsafeRunSync()
+    history.initGenesis(config).unsafeRunSync()
     history
   }
 
@@ -35,16 +38,16 @@ trait SnapshotFixture {
 
   def address(account: String): Address = {
     if (!accounts.contains(account)) {
-      accounts += (account -> SecP256k1.generateKeyPair().unsafeRunSync())
+      accounts += (account -> Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync())
     }
     Address(accounts(account))
   }
 
-  def sign(header: BlockHeader, signer: String): BlockHeader = {
+  def sign(header: BlockHeader, signer: String)(implicit chainId: BigInt): BlockHeader = {
     if (!accounts.contains(signer)) {
-      accounts += (signer -> SecP256k1.generateKeyPair().unsafeRunSync())
+      accounts += (signer -> Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync())
     }
-    val sig       = SecP256k1.sign(Clique.sigHash(header).toArray, accounts(signer)).unsafeRunSync()
+    val sig       = Signature[ECDSA].sign[IO](Clique.sigHash(header).toArray, accounts(signer), chainId).unsafeRunSync()
     val signed    = header.copy(extraData = header.extraData.dropRight(65) ++ ByteVector(sig.bytes))
     val recovered = Clique.ecrecover(signed).get
     require(recovered == Address(accounts(signer)), s"recovered: ${recovered}, signer: ${accounts(signer)}")
@@ -54,9 +57,14 @@ trait SnapshotFixture {
 
 class SnapshotSpec extends JbokSpec {
   def check(test: Test) = new SnapshotFixture {
-    val config  = CliqueConfig().copy(epoch = test.epoch)
-    val signers = test.signers.map(signer => address(signer))
-    val history = mkHistory(signers) // genesis signers
+    val config           = CliqueConfig().copy(epoch = test.epoch)
+    val signers          = test.signers.map(signer => address(signer))
+    val extra            = Clique.fillExtraData(signers)
+    val genesisConfig    = reference.genesis.copy(extraData = extra)
+    implicit val chainId = genesisConfig.chainId
+    val db               = KeyValueDB.inmem[IO].unsafeRunSync()
+    val history          = History[IO](db).unsafeRunSync()
+    history.initGenesis(genesisConfig).unsafeRunSync()
 
     // Assemble a chain of headers from the cast votes
     val headers: List[BlockHeader] = test.votes.zipWithIndex.map {
@@ -65,7 +73,7 @@ class SnapshotSpec extends JbokSpec {
         val time     = i * config.period.toSeconds
         val coinbase = address(v.voted)
         val extra    = ByteVector.fill(Clique.extraVanity + Clique.extraSeal)(0)
-        val header = BlockHeader.empty
+        val header = random[BlockHeader]
           .copy(
             number = number,
             unixTimestamp = time,
@@ -77,9 +85,9 @@ class SnapshotSpec extends JbokSpec {
     }
 
     val head           = headers.last
-    val db             = KeyValueDB.inmem[IO].unsafeRunSync()
-    val keyPair        = SecP256k1.generateKeyPair().unsafeRunSync()
-    val clique         = Clique[IO](config, history, keyPair).unsafeRunSync()
+    val keyValueDB     = KeyValueDB.inmem[IO].unsafeRunSync()
+    val keyPair        = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
+    val clique         = Clique[IO](config, genesisConfig, history, keyPair).unsafeRunSync()
     val snap           = clique.applyHeaders(head.number, head.hash, headers).unsafeRunSync()
     val updatedSigners = snap.getSigners
     import Snapshot.addressOrd
@@ -93,7 +101,7 @@ class SnapshotSpec extends JbokSpec {
       val signer   = address("A")
       val coinbase = address("B")
       val extra    = ByteVector.fill(Clique.extraVanity + Clique.extraSeal)(0.toByte)
-      val header = BlockHeader.empty
+      val header = random[BlockHeader]
         .copy(
           beneficiary = coinbase.bytes,
           extraData = extra

@@ -1,10 +1,10 @@
 package jbok.app.simulations
 
+import cats.effect.IO
 import jbok.common.GraphUtil
-import jbok.core.config.GenesisConfig
+import jbok.core.config.reference
 import jbok.core.models._
-import jbok.crypto.signature.KeyPair
-import jbok.crypto.signature.ecdsa.SecP256k1
+import jbok.crypto.signature.{ECDSA, KeyPair, Signature}
 import scalax.collection.GraphEdge.DiEdge
 import scalax.collection.GraphPredef._
 import scalax.collection._
@@ -16,7 +16,7 @@ import scodec.bits.ByteVector
 import scala.collection.mutable.{ListBuffer => MList, Map => MMap}
 import scala.util.Random
 
-class TxGraphGen(nAddr: Int = 3, gasLimit: BigInt = BigInt(21000), chainId: Byte = 0) {
+class TxGraphGen(nAddr: Int = 3, gasLimit: BigInt = BigInt(21000))(implicit chainId: BigInt) {
   case class SimTransaction(id: Int, sender: Address, receiver: Address)
 
   object SimTransaction {
@@ -31,14 +31,14 @@ class TxGraphGen(nAddr: Int = 3, gasLimit: BigInt = BigInt(21000), chainId: Byte
 
   val keyPairs = (1 to nAddr)
     .map(_ => {
-      val keyPair = SecP256k1.generateKeyPair().unsafeRunSync()
+      val keyPair = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
       SimAddress(keyPair)
     })
     .toVector
 
   val alloc: Map[String, String] = keyPairs.map(x => x.address.toString -> initBalance).toMap
 
-  val genesisConfig = GenesisConfig.default.copy(alloc = alloc)
+  val genesisConfig = reference.genesis.copy(alloc = alloc)
 
   val keyPairMap: Map[Address, KeyPair] = keyPairs.map(x => x.address -> x.keyPair).toMap
 
@@ -124,7 +124,7 @@ class TxGraphGen(nAddr: Int = 3, gasLimit: BigInt = BigInt(21000), chainId: Byte
             node <- nextNodes
             if accounts.contains(node.sender)
             (transaction, account) = genTransaction(accounts(node.sender), node.receiver)
-            _                      = transactions += SignedTransaction.sign(transaction, keyPairMap(node.sender), chainId)
+            _                      = transactions += SignedTransaction.sign[IO](transaction, keyPairMap(node.sender)).unsafeRunSync()
             _                      = mAccount += (node.sender -> account)
           } ()
           nextNodes.map(mg.remove(_))
@@ -168,6 +168,6 @@ class TxGraphGen(nAddr: Int = 3, gasLimit: BigInt = BigInt(21000), chainId: Byte
     val sender  = keyPair.address
     val tx      = Transaction(accountMap(sender).nonce, gasPrice, gasLimit, Some(address), value, ByteVector.empty)
     accountMap(sender).increaseNonce().increaseBalance(UInt256(-value))
-    SignedTransaction.sign(tx, keyPair.keyPair, chainId)
+    SignedTransaction.sign[IO](tx, keyPair.keyPair).unsafeRunSync()
   }
 }

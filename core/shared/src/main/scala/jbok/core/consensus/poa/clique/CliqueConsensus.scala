@@ -69,7 +69,7 @@ case class CliqueConsensus[F[_]](
               val delay = 0L.max(executed.block.header.unixTimestamp - System.currentTimeMillis()) + wait
               log.trace(s"signed recently, sleep (${delay}) seconds")
 
-              T.sleep(delay.millis) *>
+              T.sleep(delay.millis) >>
                 F.raiseError(new Exception(
                   s"${clique.signer} signed recently, must wait for others: ${executed.block.header.number}, ${seen}, ${snap.signers.size / 2 + 1}, ${snap.recents}"))
 
@@ -103,25 +103,30 @@ case class CliqueConsensus[F[_]](
   }
 
   override def verify(block: Block): F[Unit] =
-    history.getBlockHeaderByHash(block.header.parentHash).flatMap {
-      case Some(parent) =>
-        F.pure {
-            Set(Clique.diffInTurn, Clique.diffNoTurn).contains(block.header.difficulty) &&
-            calcGasLimit(parent.gasLimit) == block.header.gasLimit &&
-            block.header.unixTimestamp == parent.unixTimestamp + clique.config.period.toMillis &&
-            block.header.mixHash == ByteVector.empty &&
-            Set(Clique.nonceAuthVote, Clique.nonceDropVote).contains(block.header.nonce)
-          }
-          .ifM(F.unit, F.raiseError(new Exception("block verified invalid")))
-      case None => F.raiseError(HeaderParentNotFoundInvalid)
-    }
+    for {
+      blockOpt <- blockPool.getBlockFromPoolOrHistory(block.header.hash)
+      _        <- if (blockOpt.isDefined) F.raiseError(new Exception("duplicate block")) else F.unit
+      _ <- history.getBlockHeaderByHash(block.header.parentHash).flatMap[Unit] {
+        case Some(parent) =>
+          F.pure {
+              Set(Clique.diffInTurn, Clique.diffNoTurn).contains(block.header.difficulty) &&
+              calcGasLimit(parent.gasLimit) == block.header.gasLimit &&
+              block.header.unixTimestamp == parent.unixTimestamp + clique.config.period.toMillis &&
+              block.header.mixHash == ByteVector.empty &&
+              Set(Clique.nonceAuthVote, Clique.nonceDropVote).contains(block.header.nonce)
+            }
+            .ifM(F.unit, F.raiseError(new Exception("block verified invalid")))
+
+        case None => F.raiseError(HeaderParentNotFoundInvalid)
+      }
+    } yield ()
 
   override def run(block: Block): F[Consensus.Result] = {
     val result: F[Consensus.Result] = for {
-      _ <- blockPool.raiseIfDuplicate(block.header.hash)
+      _ <- verify(block)
       _ <- history.getBlockHeaderByHash(block.header.parentHash).flatMap {
         case Some(parent) =>
-          BlockValidator.preExecValidate[F](parent, block) *>
+          BlockValidator.preExecValidate[F](parent, block) >>
             clique.applyHeaders(parent.number, parent.hash, List(block.header)).void
         case None =>
           F.raiseError[Unit](HeaderParentNotFoundInvalid)

@@ -1,4 +1,5 @@
 package jbok.core.consensus
+
 import cats.data.NonEmptyList
 import jbok.core.consensus.Consensus._
 import jbok.core.ledger.History
@@ -11,16 +12,13 @@ import jbok.core.pool.BlockPool
   *   - prepareHeader: generate a [[BlockHeader]] with protocol-specific consensus fields
   *   - postProcess: post process a [[ExecutedBlock]] such as paying reward
   *   - mine: seal a [[ExecutedBlock]] into a [[MinedBlock]]
+  *   - verify: check a block fields validity
   *   - run: run a consensus upon a received [[BlockHeader]] and yield 3 possible [[Result]]s
   *     - [[Forward]] we should apply blocks and forward
   *     - [[Fork]] we should resolve to a new branch
   *     - [[Stash]]   we should stash this block since it is not decided yet
   *     - [[Discard]] we should discard this block
   *   - resolveBranch: resolve a list of headers
-  *
-  *  ConsensusFinality
-  *  - No: 4
-  *  - Yes: (F, S, D)
   */
 abstract class Consensus[F[_]](val history: History[F], val pool: BlockPool[F]) {
   def prepareHeader(parentOpt: Option[Block], ommers: List[BlockHeader] = Nil): F[BlockHeader]
@@ -45,6 +43,6 @@ object Consensus {
 
   sealed trait BranchResult
   case class BetterBranch(newBranch: NonEmptyList[BlockHeader]) extends BranchResult
-  case object NoChainSwitch                                        extends BranchResult
-  case object InvalidBranch                                        extends BranchResult
+  case object NoChainSwitch                                     extends BranchResult
+  case object InvalidBranch                                     extends BranchResult
 }

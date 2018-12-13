@@ -3,13 +3,14 @@ package jbok.core.consensus.pow.ethash
 import cats.effect.IO
 import jbok.JbokSpec
 import jbok.core.ledger.History
-import jbok.core.config.Configs.{BlockChainConfig, DaoForkConfig}
+import jbok.core.config.Configs.HistoryConfig
 import jbok.core.consensus.pow.ethash.OmmersError._
 import jbok.core.models.{Block, BlockBody, BlockHeader}
 import jbok.core.validators.HeaderInvalid.HeaderNumberInvalid
 import scodec.bits._
 import jbok.common.testkit._
 import jbok.core.testkit._
+import jbok.core.config.reference
 
 class EthashOmmersValidatorSpec extends JbokSpec {
   trait OmmersValidatorFixture {
@@ -280,11 +281,9 @@ class EthashOmmersValidatorSpec extends JbokSpec {
     history.putBlockAndReceipts(block95, Nil, 0, false).unsafeRunSync()
     history.putBlockAndReceipts(block96, Nil, 0, false).unsafeRunSync()
 
-    val blockChainConfig = BlockChainConfig()
-    val daoForkConfig    = DaoForkConfig()
-    val ommersValidator  = new EthashOmmersValidator(history, blockChainConfig, daoForkConfig)
+    val blockChainConfig = reference.history
+    val ommersValidator  = new EthashOmmersValidator(history, blockChainConfig)
   }
-
 
   "EthashOmmersValidator" should {
     "validate correctly a valid list of ommers" in new OmmersValidatorFixture {

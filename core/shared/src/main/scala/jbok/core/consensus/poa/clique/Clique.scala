@@ -9,23 +9,24 @@ import jbok.core.consensus.poa.clique.Clique._
 import jbok.core.ledger.History
 import jbok.core.models._
 import jbok.crypto._
-import jbok.crypto.signature.{CryptoSignature, ECDSA, KeyPair, Signature}
+import jbok.crypto.signature._
 import scalacache._
 import scodec.bits._
 import _root_.io.circe.generic.JsonCodec
 import jbok.codec.json.implicits._
+import jbok.core.config.GenesisConfig
 import jbok.persistent.CacheBuilder
 
 import scala.concurrent.duration._
 
 @JsonCodec
 case class CliqueConfig(
-    period: FiniteDuration = 15.seconds, // Number of seconds between blocks to enforce
-    epoch: BigInt = BigInt(30000), // Epoch length to reset votes and checkpoint
-    checkpointInterval: Int = 1024, // Number of blocks after which to save the vote snapshot to the database
-    inMemorySnapshots: Int = 128, // Number of recent vote snapshots to keep in memory
-    inMemorySignatures: Int = 1024, // Number of recent blocks to keep in memory
-    wiggleTime: FiniteDuration = 500.millis // Random delay (per signer) to allow concurrent signers
+    period: FiniteDuration = 15.seconds,
+    epoch: BigInt = BigInt(30000),
+    checkpointInterval: Int = 1024,
+    inMemorySnapshots: Int = 128,
+    inMemorySignatures: Int = 1024,
+    wiggleTime: FiniteDuration = 500.millis
 )
 
 class Clique[F[_]](
@@ -33,14 +34,15 @@ class Clique[F[_]](
     val history: History[F],
     val proposals: Map[Address, Boolean], // Current list of proposals we are pushing
     val keyPair: KeyPair
-)(implicit F: ConcurrentEffect[F], C: Cache[Snapshot]) {
+)(implicit F: ConcurrentEffect[F], C: Cache[Snapshot], chainId: BigInt) {
   private[this] val log = org.log4s.getLogger("Clique")
 
   import config._
 
   val signer: Address = Address(keyPair)
 
-  def sign(bv: ByteVector): F[CryptoSignature] = F.liftIO(Signature[ECDSA].sign(bv.toArray, keyPair))
+  def sign(bv: ByteVector): F[CryptoSignature] =
+    Signature[ECDSA].sign[F](bv.toArray, keyPair, chainId)
 
   def applyHeaders(
       number: BigInt,
@@ -106,12 +108,21 @@ object Clique {
 
   def apply[F[_]](
       config: CliqueConfig,
+      genesisConfig: GenesisConfig,
       history: History[F],
       keyPair: KeyPair
-  )(implicit F: ConcurrentEffect[F]): F[Clique[F]] =
+  )(implicit F: ConcurrentEffect[F], chainId: BigInt): F[Clique[F]] =
     for {
+      genesisBlock <- history.getBlockByNumber(0)
+      _ <- if (genesisBlock.isEmpty) {
+        val gc = genesisConfig
+          .copy(extraData = fillExtraData(List(Address(keyPair))))
+        history.initGenesis(gc)
+      } else {
+        F.unit
+      }
       cache <- CacheBuilder.build[F, Snapshot](config.inMemorySnapshots)
-    } yield new Clique[F](config, history, Map.empty, keyPair)(F, cache)
+    } yield new Clique[F](config, history, Map.empty, keyPair)(F, cache, chainId)
 
   def fillExtraData(signers: List[Address]): ByteVector =
     ByteVector.fill(extraVanity)(0.toByte) ++ signers.foldLeft(ByteVector.empty)(_ ++ _.bytes) ++ ByteVector.fill(
@@ -122,13 +133,15 @@ object Clique {
     bytes.kec256
   }
 
-  def ecrecover(header: BlockHeader): Option[Address] = {
+  def ecrecover(header: BlockHeader)(implicit chainId: BigInt): Option[Address] = {
     // Retrieve the signature from the header extra-data
-    val signature = header.extraData.takeRight(extraSeal)
-    val hash      = sigHash(header)
-    val sig       = CryptoSignature(signature.toArray)
-    Signature[ECDSA]
-      .recoverPublic(hash.toArray, sig, None)
-      .map(pub => Address(pub.bytes.kec256))
+    val signature               = header.extraData.takeRight(extraSeal)
+    val hash                    = sigHash(header)
+    val sig                     = CryptoSignature(signature.toArray)
+    val chainId: Option[BigInt] = ECDSAChainIdConvert.getChainId(sig.v)
+    chainId.flatMap(
+      Signature[ECDSA]
+        .recoverPublic(hash.toArray, sig, _)
+        .map(pub => Address(pub.bytes.kec256)))
   }
 }

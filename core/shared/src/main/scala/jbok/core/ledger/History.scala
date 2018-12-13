@@ -12,9 +12,11 @@ import jbok.evm.WorldState
 import jbok.persistent.{KeyValueDB, StageKeyValueDB}
 import scodec.bits._
 
-abstract class History[F[_]](val db: KeyValueDB[F], val chainId: Int) {
+abstract class History[F[_]](val db: KeyValueDB[F]) {
   // init
-  def init(config: GenesisConfig = GenesisConfig.default): F[Unit]
+  def initGenesis(config: GenesisConfig): F[Unit]
+
+  def dumpGenesis: F[GenesisConfig]
 
   // header
   def getBlockHeaderByHash(hash: ByteVector): F[Option[BlockHeader]]
@@ -70,10 +72,6 @@ abstract class History[F[_]](val db: KeyValueDB[F], val chainId: Int) {
 
   def getBestBlockNumber: F[BigInt]
 
-  def getEstimatedHighestBlock: F[BigInt]
-
-  def getSyncStartingBlock: F[BigInt]
-
   def getBestHeader: F[BlockHeader]
 
   def getBestBlock: F[Block]
@@ -86,21 +84,19 @@ abstract class History[F[_]](val db: KeyValueDB[F], val chainId: Int) {
 }
 
 object History {
-  def apply[F[_]: Sync](db: KeyValueDB[F], chainId: Int = 1): F[History[F]] =
+  def forPath[F[_]: Sync](dbPath: String)(implicit chainId: BigInt): F[History[F]] =
+    KeyValueDB.forPath[F](dbPath).map(db => new HistoryImpl[F](db))
+
+  def apply[F[_]: Sync](db: KeyValueDB[F])(implicit chainId: BigInt): F[History[F]] =
     Sync[F].pure {
-      new HistoryImpl[F](
-        db,
-        chainId
-      )
+      new HistoryImpl[F](db)
     }
 }
 
-class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) extends History[F](db, chainId) {
-
-  private val appStateStore = new AppStateStore[F](db)
+class HistoryImpl[F[_]](db: KeyValueDB[F])(implicit F: Sync[F], chainId: BigInt) extends History[F](db) {
 
   // init
-  override def init(config: GenesisConfig): F[Unit] =
+  override def initGenesis(config: GenesisConfig): F[Unit] =
     for {
       _ <- getBlockHeaderByNumber(0)
         .map(_.isDefined)
@@ -115,6 +111,26 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
       block = Block(config.header.copy(stateRoot = world.stateRootHash), config.body)
       _ <- putBlockAndReceipts(block, Nil, block.header.difficulty, asBestBlock = true)
     } yield ()
+
+  override def dumpGenesis: F[GenesisConfig] =
+    for {
+      header   <- genesisHeader
+      world    <- getWorldState(stateRootHash = Some(header.stateRoot))
+      accounts <- world.accountProxy.toMap
+      alloc = accounts.map {
+        case (addr, value) =>
+          addr.toString -> value.balance.toDecString
+      }
+    } yield
+      GenesisConfig(
+        header.nonce,
+        header.difficulty,
+        header.extraData,
+        header.gasLimit,
+        header.beneficiary,
+        alloc,
+        chainId
+      )
 
   // header
   override def getBlockHeaderByHash(hash: ByteVector): F[Option[BlockHeader]] =
@@ -131,23 +147,23 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
   override def putBlockHeader(blockHeader: BlockHeader, updateTD: Boolean): F[Unit] =
     if (updateTD) {
       if (blockHeader.number == 0) {
-        db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) *>
-          db.put(blockHeader.number, blockHeader.hash, namespaces.NumberHash) *>
+        db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) >>
+          db.put(blockHeader.number, blockHeader.hash, namespaces.NumberHash) >>
           db.put(blockHeader.hash, blockHeader.difficulty, namespaces.TotalDifficulty)
       } else {
         getTotalDifficultyByHash(blockHeader.parentHash).flatMap {
           case Some(td) =>
-            db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) *>
-              db.put(blockHeader.number, blockHeader.hash, namespaces.NumberHash) *>
+            db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) >>
+              db.put(blockHeader.number, blockHeader.hash, namespaces.NumberHash) >>
               db.put(blockHeader.hash, td + blockHeader.difficulty, namespaces.TotalDifficulty)
 
           case None =>
-            db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) *>
+            db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) >>
               db.put(blockHeader.number, blockHeader.hash, namespaces.NumberHash)
         }
       }
     } else {
-      db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) *>
+      db.put(blockHeader.hash, blockHeader, namespaces.BlockHeader) >>
         db.put(blockHeader.number, blockHeader.hash, namespaces.NumberHash)
     }
 
@@ -156,7 +172,7 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
     db.getOpt[ByteVector, BlockBody](hash, namespaces.BlockBody)
 
   override def putBlockBody(blockHash: ByteVector, blockBody: BlockBody): F[Unit] =
-    db.put(blockHash, blockBody, namespaces.BlockBody) *>
+    db.put(blockHash, blockBody, namespaces.BlockBody) >>
       blockBody.transactionList.zipWithIndex
         .map {
           case (tx, index) =>
@@ -194,9 +210,9 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
                                    receipts: List[Receipt],
                                    totalDifficulty: BigInt,
                                    asBestBlock: Boolean): F[Unit] =
-    putBlockHeader(block.header, updateTD = true) *>
-      putBlockBody(block.header.hash, block.body) *>
-      putReceipts(block.header.hash, receipts) *>
+    putBlockHeader(block.header, updateTD = true) >>
+      putBlockBody(block.header.hash, block.body) >>
+      putReceipts(block.header.hash, receipts) >>
       (if (asBestBlock) {
          putBestBlockNumber(block.header.number)
        } else {
@@ -207,14 +223,14 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
     val maybeBlockHeader = getBlockHeaderByHash(blockHash)
     val maybeTxList      = getBlockBodyByHash(blockHash).map(_.map(_.transactionList))
 
-    db.del(blockHash, namespaces.BlockHeader) *>
-      db.del(blockHash, namespaces.BlockBody) *>
-      db.del(blockHash, namespaces.TotalDifficulty) *>
-      db.del(blockHash, namespaces.Receipts) *>
+    db.del(blockHash, namespaces.BlockHeader) >>
+      db.del(blockHash, namespaces.BlockBody) >>
+      db.del(blockHash, namespaces.TotalDifficulty) >>
+      db.del(blockHash, namespaces.Receipts) >>
       maybeTxList.map {
         case Some(txs) => txs.traverse(tx => db.del(tx.hash, namespaces.TxLocation)).void
         case None      => F.unit
-      } *>
+      } >>
       maybeBlockHeader.map {
         case Some(bh) =>
           val removeMapping = getHashByBlockNumber(bh.number).flatMap {
@@ -223,10 +239,10 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
           }
 
           val updateBest =
-            if (parentAsBestBlock) appStateStore.putBestBlockNumber(bh.number - 1)
+            if (parentAsBestBlock) putBestBlockNumber(bh.number - 1)
             else F.unit
 
-          removeMapping *> updateBest
+          removeMapping >> updateBest
 
         case None => F.unit
       }
@@ -299,12 +315,6 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
   override def getTransactionLocation(txHash: ByteVector): F[Option[TransactionLocation]] =
     db.getOpt[ByteVector, TransactionLocation](txHash, namespaces.TxLocation)
 
-  override def getEstimatedHighestBlock: F[BigInt] =
-    appStateStore.getEstimatedHighestBlock
-
-  override def getSyncStartingBlock: F[BigInt] =
-    appStateStore.getSyncStartingBlock
-
   override def getBestHeader: F[BlockHeader] =
     (getBestBlockNumber >>= getBlockHeaderByNumber).flatMap {
       case Some(header) => F.pure(header)
@@ -319,10 +329,10 @@ class HistoryImpl[F[_]](db: KeyValueDB[F], chainId: Int)(implicit F: Sync[F]) ex
     })
 
   override def getBestBlockNumber: F[BigInt] =
-    appStateStore.getBestBlockNumber
+    db.getOptT[String, BigInt]("BestBlockNumber", namespaces.AppStateNamespace).getOrElse(BigInt(0))
 
   override def putBestBlockNumber(number: BigInt): F[Unit] =
-    appStateStore.putBestBlockNumber(number)
+    db.put[String, BigInt]("BestBlockNumber", number, namespaces.AppStateNamespace)
 
   override def genesisHeader: F[BlockHeader] =
     getBlockHeaderByNumber(0).map(_.get)
