@@ -51,7 +51,8 @@ class KeyStoreSpec extends JbokSpec {
       val passphrase = "aaa"
       keyStore.importPrivateKey(key1, passphrase).unsafeRunSync()
       val wallet = keyStore.unlockAccount(addr1, passphrase).unsafeRunSync()
-      wallet shouldBe Wallet(addr1, KeyPair.Secret(key1))
+      wallet.address shouldBe addr1
+      wallet.keyPair.secret shouldBe KeyPair.Secret(key1)
     }
 
     "return an error when unlocking an account with a wrong passphrase" in {
@@ -66,7 +67,7 @@ class KeyStoreSpec extends JbokSpec {
     }
 
     "return an error deleting not existing wallet" in {
-      val res = keyStore.deleteWallet(addr1).attempt.unsafeRunSync()
+      val res = keyStore.deleteAccount(addr1).attempt.unsafeRunSync()
       res shouldBe Left(KeyNotFound)
     }
 
@@ -75,7 +76,7 @@ class KeyStoreSpec extends JbokSpec {
       val listOfNewAccounts = keyStore.listAccounts.unsafeRunSync()
       listOfNewAccounts.toSet shouldBe Set(newAddr1)
 
-      val res = keyStore.deleteWallet(newAddr1).unsafeRunSync()
+      val res = keyStore.deleteAccount(newAddr1).unsafeRunSync()
       res shouldBe true
 
       val listOfNewAccountsAfterDelete = keyStore.listAccounts.unsafeRunSync()
@@ -88,8 +89,9 @@ class KeyStoreSpec extends JbokSpec {
 
       keyStore.importPrivateKey(key1, oldPassphrase).unsafeRunSync()
       keyStore.changePassphrase(addr1, oldPassphrase, newPassphrase).unsafeRunSync() shouldBe true
-
-      keyStore.unlockAccount(addr1, newPassphrase).unsafeRunSync() shouldBe Wallet(addr1, KeyPair.Secret(key1))
+      val wallet = keyStore.unlockAccount(addr1, newPassphrase).unsafeRunSync()
+      wallet.address shouldBe addr1
+      wallet.keyPair.secret shouldBe KeyPair.Secret(key1)
     }
 
     "return an error when changing passphrase of an non-existent wallet" in {

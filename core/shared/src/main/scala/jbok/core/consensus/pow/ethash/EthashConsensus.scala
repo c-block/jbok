@@ -11,7 +11,9 @@ import jbok.core.ledger.TypedBlock.MinedBlock
 import jbok.core.ledger.{History, TypedBlock}
 import jbok.core.models.{Block, BlockHeader}
 import jbok.core.pool.BlockPool
+import jbok.core.validators.HeaderInvalid.HeaderParentNotFoundInvalid
 import jbok.crypto._
+import jbok.common._
 import scodec.bits.ByteVector
 
 class EthashConsensus[F[_]](
@@ -58,6 +60,20 @@ class EthashConsensus[F[_]](
   override def mine(executed: TypedBlock.ExecutedBlock[F]): F[TypedBlock.MinedBlock] =
     miner.mine(executed.block).map(block => MinedBlock(block, executed.receipts))
 
+  override def verify(block: Block): F[Unit] =
+    history.getBlockHeaderByHash(block.header.parentHash).flatMap {
+      case Some(parent) =>
+        headerValidator.validate(parent, block.header) *> ommersValidator.validate(
+          block.header.parentHash,
+          block.header.number,
+          block.body.ommerList,
+          blockPool.getHeader,
+          blockPool.getNBlocks
+        )
+
+      case None => F.raiseError(HeaderParentNotFoundInvalid)
+    }
+
   override def run(block: Block): F[Consensus.Result] = ???
 //    history.getBestBlock.flatMap { parent =>
 //      F.ifM(blockPool.isDuplicate(header.hash))(
@@ -75,61 +91,56 @@ class EthashConsensus[F[_]](
 //    }
 
   override def resolveBranch(headers: List[BlockHeader]): F[Consensus.BranchResult] =
-    if (!checkHeaders(headers)) {
-      F.pure(Consensus.InvalidBranch)
-    } else {
-      val parentIsKnown = history.getBlockHeaderByHash(headers.head.parentHash).map(_.isDefined)
-      parentIsKnown.ifM(
-        ifTrue = {
-          // find blocks with same numbers in the current chain, removing any common prefix
-          headers.map(_.number).traverse(history.getBlockByNumber).map {
-            blocks =>
-              val (oldBranch, _) = blocks.flatten
-                .zip(headers)
-                .dropWhile {
-                  case (oldBlock, header) =>
-                    oldBlock.header == header
-                }
-                .unzip
-              val newHeaders              = headers.dropWhile(h => oldBranch.headOption.exists(_.header.number > h.number))
-              val currentBranchDifficulty = oldBranch.map(_.header.difficulty).sum
-              val newBranchDifficulty     = newHeaders.map(_.difficulty).sum
-              if (currentBranchDifficulty < newBranchDifficulty) {
-                Consensus.NewBetterBranch(oldBranch)
-              } else {
-                Consensus.NoChainSwitch
-              }
+    checkHeaders(headers).ifM(
+      ifTrue = headers
+        .map(_.number)
+        .traverse(history.getBlockByNumber)
+        .map { blocks =>
+          val (oldBranch, _) = blocks.flatten
+            .zip(headers)
+            .dropWhile {
+              case (oldBlock, header) =>
+                oldBlock.header == header
+            }
+            .unzip
+
+          val forkNumber = oldBranch.headOption
+            .map(_.header.number)
+            .getOrElse(headers.head.number)
+
+          val newBranch = headers.filter(_.number >= forkNumber)
+
+          val currentBranchDifficulty = oldBranch.map(_.header.difficulty).sum
+          val newBranchDifficulty     = newBranch.map(_.difficulty).sum
+          if (currentBranchDifficulty < newBranchDifficulty) {
+            Consensus.BetterBranch(NonEmptyList.fromListUnsafe(newBranch))
+          } else {
+            Consensus.NoChainSwitch
           }
         },
-        ifFalse = F.pure(Consensus.InvalidBranch)
-      )
-    }
+      ifFalse = F.pure(Consensus.InvalidBranch)
+    )
 
   ////////////////////////////////////
   ////////////////////////////////////
 
-  private def checkHeaders(headers: List[BlockHeader]): Boolean =
-    if (headers.length > 1)
-      headers.zip(headers.tail).forall {
-        case (parent, child) =>
-          parent.hash == child.parentHash && parent.number + 1 == child.number
-      } else
-      headers.nonEmpty
+  /**
+    * 1. head's parent is known
+    * 2. headers form a chain
+    */
+  private def checkHeaders(headers: List[BlockHeader]): F[Boolean] =
+    headers.nonEmpty.pure[F] &&
+      history.getBlockHeaderByHash(headers.head.parentHash).map(_.isDefined) &&
+      headers
+        .zip(headers.tail)
+        .forall {
+          case (parent, child) =>
+            parent.hash == child.parentHash && parent.number + 1 == child.number
+        }
+        .pure[F]
 
   private val difficultyCalculator = new EthDifficultyCalculator(blockChainConfig)
   private val rewardCalculator     = new EthRewardCalculator(MonetaryPolicyConfig())
-
-  private def semanticValidate(parentHeader: BlockHeader, block: Block): F[Unit] =
-    for {
-      _ <- headerValidator.validate(parentHeader, block.header)
-      _ <- ommersValidator.validate(
-        block.header.parentHash,
-        block.header.number,
-        block.body.uncleNodesList,
-        blockPool.getHeader,
-        blockPool.getNBlocks
-      )
-    } yield ()
 
   private def calcDifficulty(blockTime: Long, parentHeader: BlockHeader): F[BigInt] =
     F.pure(difficultyCalculator.calculateDifficulty(blockTime, parentHeader))

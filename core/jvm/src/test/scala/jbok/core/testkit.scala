@@ -37,9 +37,8 @@ final case class Fixture(
         history   <- History[IO](db, chainId)
         _         <- history.init(genesisConfig)
         blockPool <- BlockPool[IO](history, BlockPoolConfig())
-        cliqueConfig = CliqueConfig(period = 1.seconds)
-        sign         = (bv: ByteVector) => { SecP256k1.sign(bv.toArray, miner.keyPair) }
-        clique       = Clique[IO](cliqueConfig, history, miner.address, sign)
+        cliqueConfig = CliqueConfig(period = 100.millis)
+        clique <- Clique[IO](cliqueConfig, history, miner.keyPair)
       } yield new CliqueConsensus[IO](clique, blockPool)
 //
 //    case "ethash" =>
@@ -63,9 +62,9 @@ object testkit {
   def cliqueFixture(port: Int): Fixture = {
     val chainId = 0
     val miner   = SimAccount(Signature[ECDSA].generateKeyPair().unsafeRunSync(), BigInt("1000000000000000000000000"), 0)
-    val alloc   = Map(miner.address.toString -> miner.balance)
+    val alloc   = Map(miner.address.toString -> miner.balance.toString())
     val genesisConfig =
-      GenesisConfig.default.copy(alloc = alloc, extraData = Clique.fillExtraData(miner.address :: Nil))
+      GenesisConfig.default.copy(alloc = alloc, extraData = Clique.fillExtraData(miner.address :: Nil).toHex)
 
     Fixture(chainId, port, miner, genesisConfig, "clique")
   }
@@ -73,7 +72,7 @@ object testkit {
   def fixture(port: Int): Fixture = {
     val chainId       = 0
     val miner         = SimAccount(Signature[ECDSA].generateKeyPair().unsafeRunSync(), BigInt("100000000000000000000"), 0)
-    val alloc         = Map(miner.address.toString -> miner.balance)
+    val alloc         = Map(miner.address.toString -> miner.balance.toString())
     val genesisConfig = GenesisConfig.default.copy(alloc = alloc)
     Fixture(chainId, port, miner, genesisConfig, "ethash")
   }
@@ -117,7 +116,7 @@ object testkit {
     for {
       tx <- arbTransaction.arbitrary
       keyPair = Signature[ECDSA].generateKeyPair().unsafeRunSync()
-      stx     = SignedTransaction.sign(tx, keyPair)
+      stx     = SignedTransaction.sign(tx, keyPair, 0)
     } yield stx
   }
 
@@ -221,7 +220,7 @@ object testkit {
 
   def genPeers(min: Int, max: Int): Gen[List[Peer[IO]]] =
     for {
-      size <- Gen.chooseNum(min, max)
+      size  <- Gen.chooseNum(min, max)
       peers <- Gen.listOfN(size, genPeer)
     } yield peers
 
@@ -266,8 +265,8 @@ object testkit {
   }
 
   def genBlockMiner(implicit fixture: Fixture): Gen[BlockMiner[IO]] = {
-    val sm = random[SyncManager[IO]]
-    val miner    = BlockMiner[IO](MiningConfig(), sm).unsafeRunSync()
+    val sm    = random[SyncManager[IO]]
+    val miner = BlockMiner[IO](MiningConfig(), sm).unsafeRunSync()
     miner
   }
 
@@ -332,7 +331,7 @@ object testkit {
 
   def genFullSync(config: SyncConfig = SyncConfig())(implicit fixture: Fixture): Gen[FullSync[IO]] = {
     val executor = random[BlockExecutor[IO]]
-    FullSync[IO](config, executor)
+    FullSync[IO](config, executor).unsafeRunSync()
   }
 
   def genSyncManager(config: SyncConfig = SyncConfig())(implicit fixture: Fixture): Gen[SyncManager[IO]] = {

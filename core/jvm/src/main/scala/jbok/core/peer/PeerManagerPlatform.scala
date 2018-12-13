@@ -5,12 +5,12 @@ import java.nio.channels.AsynchronousChannelGroup
 import better.files._
 import cats.data.OptionT
 import cats.effect.concurrent.Ref
-import cats.effect.{ConcurrentEffect, IO, Timer}
+import cats.effect._
 import cats.implicits._
 import fs2.concurrent.Queue
 import jbok.common.concurrent.PriorityQueue
+import jbok.core.config.Configs.PeerConfig
 import jbok.core.ledger.History
-import jbok.core.config.Configs.PeerManagerConfig
 import jbok.core.messages.{Message, Status}
 import jbok.core.rlpx.handshake.AuthHandshaker
 import jbok.crypto.signature.{ECDSA, KeyPair, Signature}
@@ -19,40 +19,42 @@ import jbok.network.Connection
 object PeerManagerPlatform {
   private[this] val log = org.log4s.getLogger("PeerManager")
 
-  def loadNodeKey(path: String): IO[KeyPair] =
+  def loadNodeKey[F[_]: Sync](path: String): F[KeyPair] =
     for {
-      secret <- IO(File(path).lines(DefaultCharset).head).map(str => KeyPair.Secret(str))
-      pubkey <- Signature[ECDSA].generatePublicKey(secret)
+      secret <- Sync[F].delay(File(path).lines(DefaultCharset).head).map(str => KeyPair.Secret(str))
+      pubkey <- Signature[ECDSA].generatePublicKey[F](secret)
     } yield KeyPair(pubkey, secret)
 
-  def saveNodeKey(path: String, keyPair: KeyPair): IO[Unit] =
-    IO(File(path).overwrite(keyPair.secret.bytes.toHex))
+  def saveNodeKey[F[_]: Sync](path: String, keyPair: KeyPair): F[Unit] =
+    Sync[F].delay(File(path).overwrite(keyPair.secret.bytes.toHex))
 
-  def loadOrGenerateNodeKey(path: String): IO[KeyPair] =
-    loadNodeKey(path).attempt.flatMap {
+  def loadOrGenerateNodeKey[F[_]: Sync](path: String): F[KeyPair] =
+    loadNodeKey[F](path).attempt.flatMap {
       case Left(e) =>
         log.error(e)(s"read nodekey at ${path} failed, generating a random one")
         for {
-          keyPair <- Signature[ECDSA].generateKeyPair()
-          _       <- saveNodeKey(path, keyPair)
+          keyPair <- Signature[ECDSA].generateKeyPair[F]()
+          _       <- saveNodeKey[F](path, keyPair)
         } yield keyPair
 
       case Right(nodeKey) =>
-        IO.pure(nodeKey)
+        Sync[F].pure(nodeKey)
     }
 
   def apply[F[_]](
-      config: PeerManagerConfig,
+      config: PeerConfig,
       keyPairOpt: Option[KeyPair],
       history: History[F],
       maxQueueSize: Int = 64
   )(
       implicit F: ConcurrentEffect[F],
+      CS: ContextShift[F],
       T: Timer[F],
-      AG: AsynchronousChannelGroup
+      AG: AsynchronousChannelGroup,
+      chainId: BigInt
   ): F[PeerManager[F]] =
     for {
-      keyPair      <- OptionT.fromOption[F](keyPairOpt).getOrElseF(F.liftIO(loadOrGenerateNodeKey(config.nodekeyPath)))
+      keyPair      <- OptionT.fromOption[F](keyPairOpt).getOrElseF(loadOrGenerateNodeKey[F](config.nodekeyPath))
       incoming     <- Ref.of[F, Map[KeyPair.Public, Peer[F]]](Map.empty)
       outgoing     <- Ref.of[F, Map[KeyPair.Public, Peer[F]]](Map.empty)
       nodeQueue    <- PriorityQueue.bounded[F, PeerNode](maxQueueSize)

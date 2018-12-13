@@ -10,12 +10,10 @@ import scodec.bits.ByteVector
 
 class CallOpcodesSpec extends JbokSpec {
 
-  val config  = EvmConfig.PostEIP160ConfigBuilder(None)
-  val db      = KeyValueDB.inmem[IO].unsafeRunSync()
-  val history = History[IO](db).unsafeRunSync()
-//  val startState = WorldStateProxy.inMemory[IO](db).unsafeRunSync()
-  val startState =
-    history.getWorldState(noEmptyAccounts = false).unsafeRunSync()
+  val config     = EvmConfig.FrontierConfigBuilder(None)
+  val db         = KeyValueDB.inmem[IO].unsafeRunSync()
+  val history    = History[IO](db).unsafeRunSync()
+  val startState = history.getWorldState(noEmptyAccounts = false).unsafeRunSync()
   import config.feeSchedule._
 
   val fxt = new CallOpFixture(config, startState)
@@ -188,11 +186,11 @@ class CallOpcodesSpec extends JbokSpec {
         call.ownBalance shouldBe fxt.initialBalance - call.value
       }
 
-//      "consume correct gas" in {
-//        val contractCost = UInt256(3000)
-//        val expectedGas = contractCost - G_callstipend + G_call + G_callvalue // memory not increased
-//        call.stateOut.gasUsed shouldBe expectedGas
-//      }
+      "consume correct gas" in {
+        val contractCost = UInt256(3000)
+        val expectedGas  = contractCost - G_callstipend + G_call + G_callvalue // memory not increased
+        call.stateOut.gasUsed shouldBe expectedGas
+      }
     }
 
     "calling a program that executes a SELFDESTRUCT" should {
@@ -259,7 +257,7 @@ class CallOpcodesSpec extends JbokSpec {
       }
 
       "cap the provided gas after EIP-150" in {
-        call(EvmConfig.PostEIP150ConfigBuilder(None)).stateOut.stack.pop._1 shouldBe UInt256.One
+        call(EvmConfig.TangerineWhistleConfigBuilder(None)).stateOut.stack.pop._1 shouldBe UInt256.One
       }
 
       "go OOG before EIP-150 becaouse of extensive memory cost" in {
@@ -267,7 +265,7 @@ class CallOpcodesSpec extends JbokSpec {
       }
 
       "cap memory cost post EIP-150" in {
-        val CallResult = callVarMemCost(EvmConfig.PostEIP150ConfigBuilder(None))
+        val CallResult = callVarMemCost(EvmConfig.TangerineWhistleConfigBuilder(None))
         CallResult.stateOut.stack.pop._1 shouldBe UInt256.One
       }
     }
@@ -472,7 +470,7 @@ class CallOpcodesSpec extends JbokSpec {
       }
 
       "cap the provided gas after EIP-150" in {
-        call(EvmConfig.PostEIP150ConfigBuilder(None)).stateOut.stack.pop._1 shouldBe UInt256.One
+        call(EvmConfig.TangerineWhistleConfigBuilder(None)).stateOut.stack.pop._1 shouldBe UInt256.One
       }
     }
   }
@@ -648,7 +646,7 @@ class CallOpcodesSpec extends JbokSpec {
       }
 
       "cap the provided gas after EIP-150" in {
-        call(EvmConfig.PostEIP150ConfigBuilder(None)).stateOut.stack.pop._1 shouldBe UInt256.One
+        call(EvmConfig.TangerineWhistleConfigBuilder(None)).stateOut.stack.pop._1 shouldBe UInt256.One
       }
     }
   }

@@ -1,8 +1,10 @@
 package jbok.evm
 
-import jbok.core.config.Configs.BlockChainConfig
+import jbok.core.config.Configs.HistoryConfig
 import jbok.core.models.UInt256
+import jbok.evm.PrecompiledContracts.PrecompiledContract
 import scodec.bits.ByteVector
+import jbok.core.models.Address
 
 object EvmConfig {
 
@@ -10,19 +12,20 @@ object EvmConfig {
 
   val MaxCallDepth: Int = 1024
 
-  val MaxMemory
-    : UInt256 = UInt256(Int.MaxValue) /* used to artificially limit memory usage by incurring maximum gas cost */
+  /** used to artificially limit memory usage by incurring maximum gas cost */
+  val MaxMemory: UInt256 = UInt256(Int.MaxValue)
 
   /**
     * returns the evm config that should be used for given block
     */
-  def forBlock(blockNumber: BigInt, blockchainConfig: BlockChainConfig): EvmConfig = {
+  def forBlock(blockNumber: BigInt, blockchainConfig: HistoryConfig): EvmConfig = {
     val transitionBlockToConfigMapping: Map[BigInt, EvmConfigBuilder] = Map(
-      blockchainConfig.frontierBlockNumber  -> FrontierConfigBuilder,
-      blockchainConfig.homesteadBlockNumber -> HomesteadConfigBuilder,
-      blockchainConfig.eip150BlockNumber    -> PostEIP150ConfigBuilder,
-      blockchainConfig.eip160BlockNumber    -> PostEIP160ConfigBuilder,
-      blockchainConfig.eip161BlockNumber    -> PostEIP161ConfigBuilder
+      blockchainConfig.frontierBlockNumber         -> FrontierConfigBuilder,
+      blockchainConfig.homesteadBlockNumber        -> HomesteadConfigBuilder,
+      blockchainConfig.tangerineWhistleBlockNumber -> TangerineWhistleConfigBuilder,
+      blockchainConfig.spuriousDragonBlockNumber   -> SpuriousDragonConfigBuilder,
+      blockchainConfig.byzantiumBlockNumber        -> ByzantiumConfigBuilder,
+      blockchainConfig.constantinopleBlockNumber   -> ConstantinopleConfigBuilder
     )
 
     // highest transition block that is less/equal to `blockNumber`
@@ -35,44 +38,47 @@ object EvmConfig {
 
   val FrontierConfigBuilder: EvmConfigBuilder = maxCodeSize =>
     EvmConfig(
-      feeSchedule = new FeeSchedule.FrontierFeeSchedule,
+      feeSchedule = FeeSchedule.Frontier,
       opCodes = OpCodes.FrontierOpCodes,
+      preCompiledContracts = PrecompiledContracts.FrontierContracts,
       subGasCapDivisor = None,
       chargeSelfDestructForNewAccount = false,
       maxCodeSize = maxCodeSize,
+      exceptionalFailedCodeDeposit = false,
       traceInternalTransactions = false
   )
 
   val HomesteadConfigBuilder: EvmConfigBuilder = maxCodeSize =>
-    EvmConfig(
-      feeSchedule = new FeeSchedule.HomesteadFeeSchedule,
-      opCodes = OpCodes.HomesteadOpCodes,
-      subGasCapDivisor = None,
-      chargeSelfDestructForNewAccount = false,
-      maxCodeSize = maxCodeSize,
-      traceInternalTransactions = false
-  )
+    FrontierConfigBuilder(maxCodeSize).copy(feeSchedule = FeeSchedule.Homestead,
+                                            opCodes = OpCodes.HomesteadOpCodes,
+                                            exceptionalFailedCodeDeposit = true)
 
-  val PostEIP150ConfigBuilder: EvmConfigBuilder = maxCodeSize =>
-    HomesteadConfigBuilder(maxCodeSize).copy(feeSchedule = new FeeSchedule.PostEIP150FeeSchedule,
+  val TangerineWhistleConfigBuilder: EvmConfigBuilder = maxCodeSize =>
+    HomesteadConfigBuilder(maxCodeSize).copy(feeSchedule = FeeSchedule.TangerineWhistle,
                                              subGasCapDivisor = Some(64),
                                              chargeSelfDestructForNewAccount = true)
 
-  val PostEIP160ConfigBuilder: EvmConfigBuilder = maxCodeSize =>
-    PostEIP150ConfigBuilder(maxCodeSize).copy(feeSchedule = new FeeSchedule.PostEIP160FeeSchedule)
+  val SpuriousDragonConfigBuilder: EvmConfigBuilder = maxCodeSize =>
+    TangerineWhistleConfigBuilder(maxCodeSize).copy(feeSchedule = FeeSchedule.SpuriousDragon, noEmptyAccounts = true)
 
-  val PostEIP161ConfigBuilder: EvmConfigBuilder = maxCodeSize =>
-    PostEIP160ConfigBuilder(maxCodeSize).copy(noEmptyAccounts = true)
+  val ByzantiumConfigBuilder: EvmConfigBuilder = maxCodeSize =>
+    SpuriousDragonConfigBuilder(maxCodeSize)
+      .copy(opCodes = OpCodes.ByzantiumOpCodes, preCompiledContracts = PrecompiledContracts.ByzantiumContracts)
+
+  val ConstantinopleConfigBuilder: EvmConfigBuilder = maxCodeSize =>
+    ByzantiumConfigBuilder(maxCodeSize).copy(opCodes = OpCodes.ConstantinopleOpCodes)
 
 }
 
 case class EvmConfig(
     feeSchedule: FeeSchedule,
     opCodes: List[OpCode],
+    preCompiledContracts: Map[Address, PrecompiledContract],
     subGasCapDivisor: Option[Long],
     chargeSelfDestructForNewAccount: Boolean,
     maxCodeSize: Option[BigInt],
     traceInternalTransactions: Boolean,
+    exceptionalFailedCodeDeposit: Boolean,
     noEmptyAccounts: Boolean = false
 ) {
 
@@ -139,7 +145,7 @@ case class EvmConfig(
 }
 
 object FeeSchedule {
-  class FrontierFeeSchedule extends FeeSchedule {
+  trait FrontierFeeSchedule extends FeeSchedule {
     override val G_zero: BigInt          = 0
     override val G_base: BigInt          = 2
     override val G_verylow: BigInt       = 3
@@ -177,11 +183,15 @@ object FeeSchedule {
     override val G_extcode: BigInt       = 20
   }
 
-  class HomesteadFeeSchedule extends FrontierFeeSchedule {
+  object Frontier extends FrontierFeeSchedule
+
+  trait HomesteadFeeSchedule extends FrontierFeeSchedule {
     override val G_txcreate: BigInt = 32000
   }
 
-  class PostEIP150FeeSchedule extends HomesteadFeeSchedule {
+  object Homestead extends HomesteadFeeSchedule
+
+  trait TangerineWhistleFeeSchedule extends HomesteadFeeSchedule {
     override val G_sload: BigInt        = 200
     override val G_call: BigInt         = 700
     override val G_balance: BigInt      = 400
@@ -189,9 +199,13 @@ object FeeSchedule {
     override val G_extcode: BigInt      = 700
   }
 
-  class PostEIP160FeeSchedule extends PostEIP150FeeSchedule {
+  object TangerineWhistle extends TangerineWhistleFeeSchedule
+
+  trait SpuriousDragonFeeSchedule extends TangerineWhistleFeeSchedule {
     override val G_expbyte: BigInt = 50
   }
+
+  object SpuriousDragon extends SpuriousDragonFeeSchedule
 }
 
 trait FeeSchedule {

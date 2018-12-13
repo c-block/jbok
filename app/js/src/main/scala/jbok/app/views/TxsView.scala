@@ -38,7 +38,7 @@ case class TxsView(state: AppState) {
           </tr>
         </thead>
         <tbody>
-          {for (tx <- Constants(stxs.bind.toList: _*)) yield {
+          {for (tx <- Constants(stxs.all.bind.toList: _*)) yield {
           <tr>
             <td>
               <a onclick={state.hrefHandler} type="tx">
@@ -47,13 +47,13 @@ case class TxsView(state: AppState) {
             </td>
             <td>
               <a onclick={state.hrefHandler} type="address">
-                {SignedTransaction.getSender(tx).get.toString}
+                {tx.senderAddress.get.toString}
               </a>
             </td>
             <td>
               {
                 if (tx.receivingAddress == Address.empty) {
-                  <p>Contract: <a onclick={state.hrefHandler} type="address">{ContractAddress.getContractAddress(SignedTransaction.getSender(tx).get, UInt256(tx.nonce)).toString}</a> Created</p>
+                  <p>Contract: <a onclick={state.hrefHandler} type="address">{ContractAddress.getContractAddress(tx.senderAddress.get, UInt256(tx.nonce)).toString}</a> Created</p>
                 } else {
                   <a onclick={state.hrefHandler} type="address">{tx.receivingAddress.toString}</a>
                 }

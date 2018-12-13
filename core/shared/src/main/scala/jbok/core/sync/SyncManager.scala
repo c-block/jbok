@@ -37,6 +37,13 @@ final case class SyncManager[F[_]](
       }
     }
 
+  def sync: Stream[F, Option[Unit]] =
+    if (!config.fastEnabled) {
+      fullSync.stream
+    } else {
+      fastSync.stream.drain ++ fullSync.stream
+    }
+
   val history = executor.history
 
   val requestService: PeerRoutes[F] = PeerRoutes.of[F] {
@@ -78,10 +85,9 @@ final case class SyncManager[F[_]](
     case Request(peer, GetNodeData(nodeHashes, id)) =>
       val nodeData = nodeHashes
         .traverse[F, Option[ByteVector]] {
-          case NodeHash.StateMptNodeHash(v)           => history.getMptNode(v)
-          case NodeHash.StorageRootHash(v)            => history.getMptNode(v)
-          case NodeHash.ContractStorageMptNodeHash(v) => history.getMptNode(v)
-          case NodeHash.EvmCodeHash(v)                => history.getCode(v)
+          case NodeHash.StateMptNodeHash(v)   => history.getMptNode(v)
+          case NodeHash.StorageMptNodeHash(v) => history.getMptNode(v)
+          case NodeHash.EvmCodeHash(v)        => history.getCode(v)
         }
         .map(_.flatten)
 
@@ -90,7 +96,7 @@ final case class SyncManager[F[_]](
 
   val messageService: PeerRoutes[F] = PeerRoutes.of[F] {
     case Request(peer, NewBlockHashes(hashes)) =>
-      hashes.traverse(hash => peer.markBlock(hash.hash)) *> F.pure(Nil)
+      hashes.traverse(hash => peer.markBlock(hash.hash)) >> F.pure(Nil)
 
     case Request(peer, NewBlock(block)) =>
       executor
@@ -100,9 +106,9 @@ final case class SyncManager[F[_]](
     case Request(peer, stxs: SignedTransactions) =>
       log.debug(s"received ${stxs.txs.length} stxs from ${peer.id}")
       for {
-        _        <- peer.markTxs(stxs.txs.map(_.hash))
-        response <- executor.txPool.handleReceived(peer, stxs)
-      } yield response
+        _ <- peer.markTxs(stxs)
+        _ <- executor.txPool.addTransactions(stxs)
+      } yield PeerSelectStrategy.withoutTxs(stxs) -> stxs :: Nil
   }
 
   val service: PeerService[F] = {
@@ -114,7 +120,7 @@ final case class SyncManager[F[_]](
   val stream: Stream[F, Unit] =
     Stream
       .eval(haltWhenTrue.set(false))
-      .flatMap(_ => serve)
+      .flatMap(_ => Stream(serve, sync.drain).parJoinUnbounded)
       .interruptWhen(haltWhenTrue)
       .onFinalize(haltWhenTrue.set(true))
 
@@ -137,8 +143,8 @@ object SyncManager {
       executor: BlockExecutor[F],
   )(implicit F: ConcurrentEffect[F], T: Timer[F]): F[SyncManager[F]] =
     for {
-      fastSync <- FastSync[F](config, executor.peerManager)
-      fullSync = FullSync[F](config, executor)
+      fastSync     <- FastSync[F](config, executor.peerManager)
+      fullSync     <- FullSync[F](config, executor)
       haltWhenTrue <- SignallingRef[F, Boolean](true)
     } yield SyncManager[F](config, executor, fullSync, fastSync, haltWhenTrue)
 }

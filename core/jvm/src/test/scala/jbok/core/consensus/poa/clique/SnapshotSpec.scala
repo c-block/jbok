@@ -3,8 +3,8 @@ package jbok.core.consensus.poa.clique
 import cats.effect.IO
 import jbok.JbokSpec
 import jbok.common.execution._
-import jbok.core.ledger.History
 import jbok.core.config.GenesisConfig
+import jbok.core.ledger.History
 import jbok.core.models.{Address, BlockHeader}
 import jbok.crypto.signature.KeyPair
 import jbok.crypto.signature.ecdsa.SecP256k1
@@ -24,7 +24,7 @@ case class Test(signers: List[String], votes: List[TestVote], results: List[Stri
 trait SnapshotFixture {
   def mkHistory(signers: List[Address]) = {
     val extra   = Clique.fillExtraData(signers)
-    val config = GenesisConfig.default.copy(extraData = extra)
+    val config = GenesisConfig.default.copy(extraData = extra.toHex)
     val db      = KeyValueDB.inmem[IO].unsafeRunSync()
     val history = History[IO](db).unsafeRunSync()
     history.init(config).unsafeRunSync()
@@ -46,7 +46,7 @@ trait SnapshotFixture {
     }
     val sig       = SecP256k1.sign(Clique.sigHash(header).toArray, accounts(signer)).unsafeRunSync()
     val signed    = header.copy(extraData = header.extraData.dropRight(65) ++ ByteVector(sig.bytes))
-    val recovered = Clique.ecrecover(signed)
+    val recovered = Clique.ecrecover(signed).get
     require(recovered == Address(accounts(signer)), s"recovered: ${recovered}, signer: ${accounts(signer)}")
     signed
   }
@@ -79,9 +79,8 @@ class SnapshotSpec extends JbokSpec {
     val head           = headers.last
     val db             = KeyValueDB.inmem[IO].unsafeRunSync()
     val keyPair        = SecP256k1.generateKeyPair().unsafeRunSync()
-    val sign           = (bv: ByteVector) => SecP256k1.sign(bv.toArray, keyPair)
-    val clique         = Clique[IO](config, history, Address(keyPair), sign)
-    val snap           = clique.snapshot(head.number, head.hash, headers).unsafeRunSync()
+    val clique         = Clique[IO](config, history, keyPair).unsafeRunSync()
+    val snap           = clique.applyHeaders(head.number, head.hash, headers).unsafeRunSync()
     val updatedSigners = snap.getSigners
     import Snapshot.addressOrd
     val expectedSigners = test.results.map(address).sorted
@@ -100,7 +99,7 @@ class SnapshotSpec extends JbokSpec {
           extraData = extra
         )
       val signed = sign(header, "A")
-      Clique.ecrecover(signed) shouldBe signer
+      Clique.ecrecover(signed).get shouldBe signer
     }
 
     "single signer, no votes cast" in {

@@ -5,7 +5,7 @@ import jbok.JbokSpec
 import jbok.core.ledger.History
 import jbok.core.models.{Address, UInt256}
 import jbok.crypto._
-import jbok.crypto.signature.ecdsa.SecP256k1
+import jbok.crypto.signature.{ECDSA, Signature}
 import jbok.persistent.KeyValueDB
 import scodec.bits._
 import jbok.evm.testkit._
@@ -20,17 +20,18 @@ class PrecompiledContractsSpec extends JbokSpec {
     val world = history
       .getWorldState()
       .unsafeRunSync()
-    ProgramContext(env, recipient, gas, world, EvmConfig.PostEIP161ConfigBuilder(None))
+    ProgramContext(env, recipient, gas, world, EvmConfig.ByzantiumConfigBuilder(None))
   }
 
   "ECDSARECOVER" in {
-    val keyPair  = SecP256k1.generateKeyPair().unsafeRunSync()
-    val bytesGen = getByteVectorGen(1, 128)
+    val keyPair         = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
+    val bytesGen        = getByteVectorGen(1, 128)
+    val chainId: BigInt = 0
 
     forAll(bytesGen) { bytes =>
       val hash             = bytes.kec256
-      val validSig         = SecP256k1.sign(hash.toArray, keyPair).unsafeRunSync()
-      val recoveredPub     = SecP256k1.recoverPublic(hash.toArray, validSig).get
+      val validSig         = Signature[ECDSA].sign[IO](hash.toArray, keyPair, chainId).unsafeRunSync()
+      val recoveredPub     = Signature[ECDSA].recoverPublic(hash.toArray, validSig, chainId).get
       val recoveredAddress = recoveredPub.bytes.kec256.slice(12, 32).padLeft(32)
       val inputData        = hash ++ UInt256(validSig.v).bytes ++ UInt256(validSig.r).bytes ++ UInt256(validSig.s).bytes
 

@@ -3,15 +3,7 @@ package jbok.evm
 import jbok.core.models.UInt256
 import scodec.bits.ByteVector
 
-object Memory {
-  def empty: Memory = Memory(ByteVector.empty)
-
-  private def zeros(size: Int): ByteVector = ByteVector(Array.fill[Byte](size)(0))
-}
-
 case class Memory(underlying: ByteVector) extends AnyVal {
-
-  import Memory.zeros
 
   def store(offset: UInt256, b: Byte): Memory = store(offset, ByteVector(b))
 
@@ -51,13 +43,13 @@ case class Memory(underlying: ByteVector) extends AnyVal {
       (ByteVector.empty, this)
     } else {
       val start: Int = offset.toInt
-      val end: Int = start + size
+      val end: Int   = start + size
 
       val newUnderlying =
         if (end <= underlying.size)
           underlying
         else
-          underlying ++ zeros(end - underlying.size.toInt)
+          underlying ++ Memory.zeros(end - underlying.size.toInt)
 
       (newUnderlying.slice(start, end), Memory(newUnderlying))
     }
@@ -72,7 +64,7 @@ case class Memory(underlying: ByteVector) extends AnyVal {
     if (this.size >= totalSize || size.isZero) {
       this
     } else {
-      val fill = zeros(totalSize - this.size)
+      val fill = Memory.zeros(totalSize - this.size)
       Memory(underlying ++ fill)
     }
   }
@@ -81,4 +73,10 @@ case class Memory(underlying: ByteVector) extends AnyVal {
     * @return memory size in bytes
     */
   def size: Int = underlying.length.toInt
+}
+
+object Memory {
+  val empty: Memory = Memory(ByteVector.empty)
+
+  private def zeros(size: Int): ByteVector = ByteVector(Array.fill[Byte](size)(0))
 }

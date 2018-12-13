@@ -110,8 +110,17 @@ final class MerklePatriciaTrie[F[_]](
     } yield m.map { case (k, v) => ByteVector.fromValidHex(k) -> v }
   }
 
+  override def keys[Key: Codec](namespace: ByteVector): F[List[Key]] =
+    keysRaw.flatMap(_.traverse(k => decode[Key](k, namespace)))
+
+  override def toMap[Key: Codec, Val: Codec](namespace: ByteVector): F[Map[Key, Val]] =
+    for {
+      mapRaw <- toMapRaw
+      xs     <- mapRaw.toList.traverse { case (k, v) => (decode[Key](k, namespace), decode[Val](v)).tupled }
+    } yield xs.toMap
+
   override protected[jbok] def writeBatchRaw(put: List[(ByteVector, ByteVector)], del: List[ByteVector]): F[Unit] =
-    del.traverse(delRaw) *> put.traverse { case (k, v) => putRaw(k, v) }.void
+    del.traverse(delRaw) >> put.traverse { case (k, v) => putRaw(k, v) }.void
 
   // note: since merkle trie only use key as tree path, we do not need
   // prefix key by namespace. we only need prefix node bytes hash when
@@ -554,6 +563,14 @@ object MerklePatriciaTrie {
     for {
       rootHash <- Ref.of[F, Option[ByteVector]](root)
     } yield new MerklePatriciaTrie[F](namespace, db, rootHash)
+
+  def calcMerkleRoot[F[_]: Sync, V: Codec](entities: List[V]): F[ByteVector] =
+    for {
+      db   <- KeyValueDB.inmem[F]
+      mpt  <- MerklePatriciaTrie[F](ByteVector.empty, db)
+      _    <- entities.zipWithIndex.map { case (v, k) => mpt.put[Int, V](k, v, ByteVector.empty) }.sequence
+      root <- mpt.getRootHash
+    } yield root
 
   val emptyRootHash: ByteVector = rempty.encode(()).require.bytes.kec256
 

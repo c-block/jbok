@@ -7,19 +7,17 @@ import cats.implicits._
 import fs2.concurrent.Topic
 import jbok.app.FullNode
 import jbok.app.simulations.SimulationImpl.NodeId
-import jbok.common.ExecutionPlatform.mkThreadFactory
 import jbok.common.execution._
 import jbok.core.config.Configs.FullNodeConfig
 import jbok.core.config.GenesisConfig
 import jbok.core.consensus.Consensus
 import jbok.core.consensus.poa.clique.{Clique, CliqueConfig, CliqueConsensus}
 import jbok.core.ledger.History
+import jbok.core.messages.SignedTransactions
 import jbok.core.models.{Account, Address}
 import jbok.core.pool.BlockPool
-import jbok.crypto.signature.ecdsa.SecP256k1
 import jbok.crypto.signature.{ECDSA, KeyPair, Signature}
 import jbok.persistent.KeyValueDB
-import scodec.bits.ByteVector
 
 import scala.collection.mutable.{ListBuffer => MList}
 import scala.concurrent.ExecutionContext
@@ -57,7 +55,7 @@ class SimulationImpl(
     val genesisConfig =
       GenesisConfig.default
         .copy(alloc = txGraphGen.alloc,
-              extraData = Clique.fillExtraData(minerSingers.map(Address(_))),
+              extraData = Clique.fillExtraData(minerSingers.map(Address(_))).toHex,
               timestamp = System.currentTimeMillis())
     log.info(s"create ${n} node(s)")
 
@@ -66,12 +64,11 @@ class SimulationImpl(
         case (config, idx) =>
           implicit val ec =
             ExecutionContext.fromExecutor(Executors.newFixedThreadPool(2, mkThreadFactory(s"EC${idx}", true)))
-          val sign = (bv: ByteVector) => { SecP256k1.sign(bv.toArray, signers(idx)) }
           for {
-            db      <- KeyValueDB.inmem[IO]
-            history <- History[IO](db)
-            _       <- history.init(genesisConfig)
-            clique = Clique[IO](cliqueConfig, history, Address(signers(idx)), sign)
+            db        <- KeyValueDB.inmem[IO]
+            history   <- History[IO](db)
+            _         <- history.init(genesisConfig)
+            clique    <- Clique[IO](cliqueConfig, history, signers(idx))
             blockPool <- BlockPool(history)
             consensus = new CliqueConsensus[IO](clique, blockPool)
             fullNode <- newFullNode(config, consensus)
@@ -195,7 +192,7 @@ class SimulationImpl(
         case "DoubleSpend" => txGraphGen.nextDoubleSpendTxs2(nStx)
         case _             => txGraphGen.nextValidTxs(nStx)
       }
-      _ <- minerTxPool.map(_.addTransactions(stxs)).getOrElse(IO.unit)
+      _ <- minerTxPool.map(_.addTransactions(SignedTransactions(stxs), true)).getOrElse(IO.unit)
     } yield ()
 
   override def getAccounts(): IO[List[(Address, Account)]] = IO { txGraphGen.accountMap.toList }
@@ -205,7 +202,7 @@ class SimulationImpl(
       nodeIdList <- miners.get.map(_.keys.toList)
       nodeId = Random.shuffle(nodeIdList).take(1).head
       ns <- nodes.get
-      _  <- ns(nodeId).txPool.addTransactions(List(txGraphGen.getCoin(address, value)))
+      _  <- ns(nodeId).txPool.addTransactions(SignedTransactions(List(txGraphGen.getCoin(address, value))), true)
     } yield ()
 }
 

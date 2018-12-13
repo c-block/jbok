@@ -1,8 +1,7 @@
 package jbok.core.models
 
-import cats.effect.IO
+import cats.effect.Sync
 import io.circe.{Decoder, Encoder}
-import io.circe.generic.semiauto.{deriveDecoder, deriveEncoder}
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.implicits._
 import jbok.codec.json.implicits._
@@ -10,6 +9,8 @@ import jbok.crypto._
 import jbok.crypto.signature.{CryptoSignature, ECDSA, KeyPair, Signature}
 import scodec.bits.ByteVector
 import shapeless._
+import cats.implicits._
+import jbok.core.validators.TxInvalid.TxSignatureInvalid
 
 case class SignedTransaction(
     nonce: BigInt,
@@ -18,6 +19,7 @@ case class SignedTransaction(
     receivingAddress: Address,
     value: BigInt,
     payload: ByteVector,
+    chainId: Byte,
     v: BigInt,
     r: BigInt,
     s: BigInt
@@ -25,58 +27,51 @@ case class SignedTransaction(
   lazy val hash: ByteVector =
     RlpCodec.encode(this).require.bytes.kec256
 
-  def senderAddress(chainId: Option[Byte]): Option[Address] =
+  lazy val senderAddress: Option[Address] =
     SignedTransaction.getSender(this, chainId)
 
-  def isContractInit: Boolean = receivingAddress.equals(Address.empty)
+  def getSenderOrThrow[F[_]: Sync]: F[Address] =
+    Sync[F].fromOption(senderAddress, TxSignatureInvalid)
+
+  def isContractInit: Boolean =
+    receivingAddress == Address.empty
 }
 
 object SignedTransaction {
-  implicit val txJsonEncoder: Encoder[SignedTransaction] = deriveEncoder[SignedTransaction]
+  implicit val txJsonEncoder: Encoder[SignedTransaction] =
+    deriveEncoder[SignedTransaction]
 
-  implicit val txJsonDecoder: Decoder[SignedTransaction] = deriveDecoder[SignedTransaction]
-
-  def apply(
-      tx: Transaction,
-      pointSign: Byte,
-      signatureRandom: ByteVector,
-      signature: ByteVector,
-      chainId: Byte
-  ): SignedTransaction =
-    new SignedTransaction(
-      tx.nonce,
-      tx.gasPrice,
-      tx.gasLimit,
-      tx.receivingAddress.getOrElse(Address.empty),
-      tx.value,
-      tx.payload,
-      BigInt(1, Array(pointSign)),
-      BigInt(1, signatureRandom.toArray),
-      BigInt(1, signature.toArray)
-    )
+  implicit def txJsonDecoder: Decoder[SignedTransaction] =
+    deriveDecoder[SignedTransaction]
 
   def apply(
       tx: Transaction,
-      pointSign: Byte,
-      signatureRandom: ByteVector,
-      signature: ByteVector,
-      address: Address
-  ): SignedTransaction = {
-    val txSig = CryptoSignature(BigInt(1, signatureRandom.toArray), BigInt(1, signature.toArray), pointSign)
-    new SignedTransaction(
-      tx.nonce,
-      tx.gasPrice,
-      tx.gasLimit,
-      tx.receivingAddress.getOrElse(Address(ByteVector.empty)),
-      tx.value,
-      tx.payload,
-      BigInt(1, Array(pointSign)),
-      BigInt(1, signatureRandom.toArray),
-      BigInt(1, signature.toArray)
-    )
-  }
+      chainId: Byte,
+      v: BigInt,
+      r: BigInt,
+      s: BigInt
+  ): SignedTransaction = SignedTransaction(
+    tx.nonce,
+    tx.gasPrice,
+    tx.gasLimit,
+    tx.receivingAddress.getOrElse(Address.empty),
+    tx.value,
+    tx.payload,
+    chainId,
+    v,
+    r,
+    s
+  )
 
-  def sign(tx: Transaction, keyPair: KeyPair, chainId: Option[Byte] = None): SignedTransaction = {
+  def apply(
+      tx: Transaction,
+      chainId: Byte,
+      v: Byte,
+      r: ByteVector,
+      s: ByteVector
+  ): SignedTransaction = apply(tx, chainId, BigInt(1, Array(v)), BigInt(1, r.toArray), BigInt(1, s.toArray))
+
+  def sign(tx: Transaction, keyPair: KeyPair, chainId: Byte): SignedTransaction = {
     val stx = new SignedTransaction(
       tx.nonce,
       tx.gasPrice,
@@ -84,58 +79,28 @@ object SignedTransaction {
       tx.receivingAddress.getOrElse(Address(ByteVector.empty)),
       tx.value,
       tx.payload,
+      chainId,
       BigInt(0),
       BigInt(0),
       BigInt(0)
     )
     val bytes = bytesToSign(stx, chainId)
-    val sig   = Signature[ECDSA].sign(bytes.toArray, keyPair, chainId).unsafeRunSync()
+    val sig   = Signature[ECDSA].sign(bytes.toArray, keyPair, Some(chainId)).unsafeRunSync()
     stx.copy(v = BigInt(1, Array(sig.v)), r = sig.r, s = sig.s)
   }
 
-  def signIO(tx: Transaction, keyPair: KeyPair, chainId: Option[Byte] = None): IO[SignedTransaction] = {
-    val stx = new SignedTransaction(
-      tx.nonce,
-      tx.gasPrice,
-      tx.gasLimit,
-      tx.receivingAddress.getOrElse(Address(ByteVector.empty)),
-      tx.value,
-      tx.payload,
-      BigInt(0),
-      BigInt(0),
-      BigInt(0)
-    )
-    val bytes = bytesToSign(stx, chainId)
-    for {
-      sig <- Signature[ECDSA].sign(bytes.toArray, keyPair, chainId)
-    } yield stx.copy(v = BigInt(1, Array(sig.v)), r = sig.r, s = sig.s)
-  }
+  private def bytesToSign(stx: SignedTransaction, chainId: Byte): ByteVector =
+      chainSpecificTransactionBytes(stx, chainId)
 
-  def verify(stx: SignedTransaction, chainId: Option[Byte], sender: Address): Boolean = {
-    val bytesToSign = SignedTransaction.bytesToSign(stx, chainId)
-    SignedTransaction.getSender(stx, chainId).contains(sender)
-  }
-
-  private def bytesToSign(stx: SignedTransaction, chainId: Option[Byte]): ByteVector =
-    chainId match {
-      case Some(id) => chainSpecificTransactionBytes(stx, id)
-      case None     => generalTransactionBytes(stx)
-    }
-
-  private def recoverPublicKey(stx: SignedTransaction, chainId: Option[Byte]): Option[KeyPair.Public] = {
+  private def recoverPublicKey(stx: SignedTransaction, chainId: Byte): Option[KeyPair.Public] = {
     val bytesToSign = SignedTransaction.bytesToSign(stx, chainId)
     val txSig       = CryptoSignature(stx.r, stx.s, stx.v.toByte)
 
-    Signature[ECDSA].recoverPublic(bytesToSign.toArray, txSig, chainId)
+    Signature[ECDSA].recoverPublic(bytesToSign.toArray, txSig, Some(chainId))
   }
 
-  private[jbok] def getSender(stx: SignedTransaction, chainId: Option[Byte] = None): Option[Address] =
-    SignedTransaction.recoverPublicKey(stx, chainId).map(pk => Address(pk.bytes.kec256))
-
-  private def generalTransactionBytes(stx: SignedTransaction): ByteVector = {
-    val hlist = stx.nonce :: stx.gasPrice :: stx.gasLimit :: stx.receivingAddress :: stx.value :: stx.payload :: HNil
-    RlpCodec.encode(hlist).require.bytes.kec256
-  }
+  private def getSender(stx: SignedTransaction, chainId: Byte): Option[Address] =
+    recoverPublicKey(stx, chainId).map(pk => Address(pk.bytes.kec256))
 
   private def chainSpecificTransactionBytes(stx: SignedTransaction, chainId: Byte): ByteVector = {
     val hlist = stx.nonce :: stx.gasPrice :: stx.gasLimit :: stx.receivingAddress :: stx.value :: stx.payload :: chainId :: BigInt(

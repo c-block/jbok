@@ -1,5 +1,6 @@
 package jbok.core.consensus.poa.clique
 
+import cats.data.NonEmptyList
 import cats.effect.{ConcurrentEffect, Timer}
 import cats.implicits._
 import jbok.core.consensus.Consensus
@@ -7,10 +8,13 @@ import jbok.core.ledger.TypedBlock._
 import jbok.core.models.{Address, Block, BlockHeader, Receipt}
 import jbok.core.pool.BlockPool
 import jbok.core.pool.BlockPool.Leaf
+import jbok.core.validators.BlockValidator
+import jbok.core.validators.HeaderInvalid.HeaderParentNotFoundInvalid
 import scodec.bits.ByteVector
+import jbok.common._
 
-import scala.util.Random
 import scala.concurrent.duration._
+import scala.util.Random
 
 case class CliqueConsensus[F[_]](
     clique: Clique[F],
@@ -24,16 +28,13 @@ case class CliqueConsensus[F[_]](
       parent <- parentOpt.fold(history.getBestBlock)(_.pure[F])
       blockNumber = parent.header.number + 1
       timestamp   = parent.header.unixTimestamp + clique.config.period.toMillis
-      snap <- clique.snapshot(blockNumber - 1, parent.header.hash, Nil)
-      _ = log.trace(s"loaded snap from block(${blockNumber - 1})")
-      _ = log.trace(s"timestamp: ${timestamp}, stime: ${System.currentTimeMillis()}")
+      snap <- clique.applyHeaders(parent.header.number, parent.header.hash, Nil)
     } yield
       BlockHeader(
         parentHash = parent.header.hash,
-        ommersHash = ByteVector.empty,
+        ommersHash = Clique.ommersHash,
         beneficiary = ByteVector.empty,
         stateRoot = ByteVector.empty,
-        //we are not able to calculate transactionsRoot here because we do not know if they will fail
         transactionsRoot = ByteVector.empty,
         receiptsRoot = ByteVector.empty,
         logsBloom = ByteVector.empty,
@@ -56,22 +57,21 @@ case class CliqueConsensus[F[_]](
       F.raiseError(new Exception("mining the genesis block is not supported"))
     } else {
       for {
-        snap <- clique.snapshot(executed.block.header.number - 1, executed.block.header.parentHash, Nil)
+        snap <- clique.applyHeaders(executed.block.header.number - 1, executed.block.header.parentHash, Nil)
         mined <- if (!snap.signers.contains(clique.signer)) {
           F.raiseError(new Exception("unauthorized"))
         } else {
           snap.recents.find(_._2 == clique.signer) match {
             case Some((seen, _)) if amongstRecent(executed.block.header.number, seen, snap.signers.size) =>
               // If we're amongst the recent signers, wait for the next block
-
               val wait = (snap.signers.size / 2 + 1 - (executed.block.header.number - seen).toInt)
                 .max(0) * clique.config.period.toMillis
               val delay = 0L.max(executed.block.header.unixTimestamp - System.currentTimeMillis()) + wait
               log.trace(s"signed recently, sleep (${delay}) seconds")
 
               T.sleep(delay.millis) *>
-              F.raiseError(new Exception(
-                s"${clique.signer} signed recently, must wait for others: ${executed.block.header.number}, ${seen}, ${snap.signers.size / 2 + 1}, ${snap.recents}"))
+                F.raiseError(new Exception(
+                  s"${clique.signer} signed recently, must wait for others: ${executed.block.header.number}, ${seen}, ${snap.signers.size / 2 + 1}, ${snap.recents}"))
 
             case _ =>
               val wait = 0L.max(executed.block.header.unixTimestamp - System.currentTimeMillis())
@@ -79,7 +79,8 @@ case class CliqueConsensus[F[_]](
               val delay: Long = wait +
                 (if (executed.block.header.difficulty == Clique.diffNoTurn) {
                    // It's not our turn explicitly to sign, delay it a bit
-                   val wiggle: Long = Random.nextLong().abs % ((snap.signers.size / 2 + 1) * Clique.wiggleTime.toMillis)
+                   val wiggle
+                     : Long = Random.nextLong().abs % ((snap.signers.size / 2 + 1) * clique.config.wiggleTime.toMillis)
                    log.trace(s"${clique.signer} it is not our turn, delay ${wiggle}")
                    wiggle
                  } else {
@@ -101,29 +102,47 @@ case class CliqueConsensus[F[_]](
     }
   }
 
-  override def run(block: Block): F[Consensus.Result] =
-    for {
-      best        <- history.getBestBlock
-      parentTd    <- history.getTotalDifficultyByHash(best.header.hash).map(_.get)
-      snap        <- clique.snapshot(best.header.number, best.header.hash, Nil)
-      isDuplicate <- blockPool.isDuplicate(block.header.hash)
-      result <- if (isDuplicate) {
-        Consensus.Discard(new Exception(s"Duplicated Block: ${block.tag}")).pure[F]
-      } else if (block.header.number == best.header.number + 1) {
+  override def verify(block: Block): F[Unit] =
+    history.getBlockHeaderByHash(block.header.parentHash).flatMap {
+      case Some(parent) =>
+        F.pure {
+            Set(Clique.diffInTurn, Clique.diffNoTurn).contains(block.header.difficulty) &&
+            calcGasLimit(parent.gasLimit) == block.header.gasLimit &&
+            block.header.unixTimestamp == parent.unixTimestamp + clique.config.period.toMillis &&
+            block.header.mixHash == ByteVector.empty &&
+            Set(Clique.nonceAuthVote, Clique.nonceDropVote).contains(block.header.nonce)
+          }
+          .ifM(F.unit, F.raiseError(new Exception("block verified invalid")))
+      case None => F.raiseError(HeaderParentNotFoundInvalid)
+    }
+
+  override def run(block: Block): F[Consensus.Result] = {
+    val result: F[Consensus.Result] = for {
+      _ <- blockPool.raiseIfDuplicate(block.header.hash)
+      _ <- history.getBlockHeaderByHash(block.header.parentHash).flatMap {
+        case Some(parent) =>
+          BlockValidator.preExecValidate[F](parent, block) *>
+            clique.applyHeaders(parent.number, parent.hash, List(block.header)).void
+        case None =>
+          F.raiseError[Unit](HeaderParentNotFoundInvalid)
+      }
+      best   <- history.getBestBlock
+      bestTd <- history.getTotalDifficultyByHash(best.header.hash).map(_.get)
+      result <- if (block.header.number == best.header.number + 1) {
         for {
           topBlockHash <- blockPool.addBlock(block).map(_.get.hash)
           topBlocks    <- blockPool.getBranch(topBlockHash, delete = true)
         } yield Consensus.Forward(topBlocks)
       } else {
         blockPool.addBlock(block).flatMap[Consensus.Result] {
-          case Some(Leaf(leafHash, leafTd)) if leafTd > parentTd =>
+          case Some(Leaf(leafHash, leafTd)) if leafTd > bestTd =>
             for {
               newBranch <- blockPool.getBranch(leafHash, delete = true)
               staleBlocksWithReceiptsAndTDs <- removeBlocksUntil(newBranch.head.header.parentHash, best.header.number)
                 .map(_.reverse)
               staleBlocks = staleBlocksWithReceiptsAndTDs.map(_._1)
               _ <- staleBlocks.traverse(block => blockPool.addBlock(block))
-            } yield Consensus.Resolve(staleBlocks, newBranch)
+            } yield Consensus.Fork(staleBlocks, newBranch)
 
           case _ =>
             F.pure(Consensus.Stash(block))
@@ -131,36 +150,41 @@ case class CliqueConsensus[F[_]](
       }
     } yield result
 
+    result.attempt.map {
+      case Left(e)  => Consensus.Discard(e)
+      case Right(x) => x
+    }
+  }
+
   override def resolveBranch(headers: List[BlockHeader]): F[Consensus.BranchResult] =
-    if (!checkHeaders(headers)) {
-      F.pure(Consensus.InvalidBranch)
-    } else {
-      val parentIsKnown = history.getBlockHeaderByHash(headers.head.parentHash).map(_.isDefined)
-      parentIsKnown.ifM(
-        ifTrue = {
-          // find blocks with same numbers in the current chain, removing any common prefix
-          headers.map(_.number).traverse(history.getBlockByNumber).map {
-            blocks =>
-              val (oldBranch, _) = blocks.flatten
-                .zip(headers)
-                .dropWhile {
-                  case (oldBlock, header) =>
-                    oldBlock.header == header
-                }
-                .unzip
-              val newHeaders              = headers.dropWhile(h => oldBranch.headOption.exists(_.header.number > h.number))
-              val currentBranchDifficulty = oldBranch.map(_.header.difficulty).sum
-              val newBranchDifficulty     = newHeaders.map(_.difficulty).sum
-              if (currentBranchDifficulty < newBranchDifficulty) {
-                Consensus.NewBetterBranch(oldBranch)
-              } else {
-                Consensus.NoChainSwitch
-              }
+    checkHeaders(headers).ifM(
+      ifTrue = headers
+        .map(_.number)
+        .traverse(history.getBlockByNumber)
+        .map { blocks =>
+          log.debug(s"local blocks: ${blocks.flatten.map(_.tag)}")
+
+          val (a, newBranch) = blocks
+            .zip(headers)
+            .dropWhile {
+              case (Some(block), header) if block.header == header => true
+              case _                                               => false
+            }
+            .unzip
+
+          val oldBranch = a.takeWhile(_.isDefined).map(_.get)
+
+          val currentBranchDifficulty = oldBranch.map(_.header.difficulty).sum
+          val newBranchDifficulty     = newBranch.map(_.difficulty).sum
+          if (currentBranchDifficulty < newBranchDifficulty) {
+            log.debug(s"resolved better branch ${newBranch.map(_.tag)}")
+            Consensus.BetterBranch(NonEmptyList.fromListUnsafe(newBranch))
+          } else {
+            Consensus.NoChainSwitch
           }
         },
-        ifFalse = F.pure(Consensus.InvalidBranch)
-      )
-    }
+      ifFalse = F.pure(Consensus.InvalidBranch)
+    )
 
   //////////////////////////////////
   //////////////////////////////////
@@ -183,13 +207,20 @@ case class CliqueConsensus[F[_]](
         F.pure(Nil)
     }
 
-  private def checkHeaders(headers: List[BlockHeader]): Boolean =
-    if (headers.length > 1)
-      headers.zip(headers.tail).forall {
-        case (parent, child) =>
-          parent.hash == child.parentHash && parent.number + 1 == child.number
-      } else
-      headers.nonEmpty
+  /**
+    * 1. head's parent is known
+    * 2. headers form a chain
+    */
+  private def checkHeaders(headers: List[BlockHeader]): F[Boolean] =
+    headers.nonEmpty.pure[F] &&
+      ((headers.head.number == 0).pure[F] || history.getBlockHeaderByHash(headers.head.parentHash).map(_.isDefined)) &&
+      headers
+        .zip(headers.tail)
+        .forall {
+          case (parent, child) =>
+            parent.hash == child.parentHash && parent.number + 1 == child.number
+        }
+        .pure[F]
 
   private def calcDifficulty(snapshot: Snapshot, signer: Address, number: BigInt): BigInt =
     if (snapshot.inturn(number, signer)) Clique.diffInTurn else Clique.diffNoTurn

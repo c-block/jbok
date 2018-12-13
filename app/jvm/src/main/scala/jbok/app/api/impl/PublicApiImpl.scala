@@ -49,7 +49,7 @@ class PublicApiImpl(
     history.getBlockByNumber(blockNumber)
 
   override def getTransactionByHash(txHash: ByteVector): IO[Option[SignedTransaction]] = {
-    val pending = OptionT(txPool.getPendingTransactions.map(_.map(_.stx).find(_.hash == txHash)))
+    val pending = OptionT(txPool.getPendingTransactions.map(_.keys.toList.find(_.hash == txHash)))
     val inBlock = for {
       loc   <- OptionT(history.getTransactionLocation(txHash))
       block <- OptionT(history.getBlockByHash(loc.blockHash))
@@ -84,7 +84,7 @@ class PublicApiImpl(
   override def getUncleByBlockHashAndIndex(blockHash: ByteVector, uncleIndex: Int): IO[Option[BlockHeader]] = {
     val x = for {
       block <- OptionT(history.getBlockByHash(blockHash))
-      uncle <- OptionT.fromOption[IO](block.body.uncleNodesList.lift(uncleIndex))
+      uncle <- OptionT.fromOption[IO](block.body.ommerList.lift(uncleIndex))
     } yield uncle
 
     x.value
@@ -93,7 +93,7 @@ class PublicApiImpl(
   override def getUncleByBlockNumberAndIndex(blockParam: BlockParam, uncleIndex: Int): IO[Option[BlockHeader]] = {
     val x = for {
       block <- OptionT.liftF(resolveBlock(blockParam))
-      uncle <- OptionT.fromOption[IO](block.body.uncleNodesList.lift(uncleIndex))
+      uncle <- OptionT.fromOption[IO](block.body.ommerList.lift(uncleIndex))
     } yield uncle
 
     x.value
@@ -121,18 +121,9 @@ class PublicApiImpl(
     } yield gasPrice
   }
 
-  override def getMining: IO[Boolean] = miner.haltWhenTrue.get.map(!_)
+  override def isMining: IO[Boolean] = miner.haltWhenTrue.get.map(!_)
 
-  override def getHashRate: IO[BigInt] =
-    ???
-//    hashRate.update(m => removeObsoleteHashrates(new Date, m)).map(_.now.map(_._2._1).sum)
-
-  override def getWork: IO[GetWorkResponse] = ???
-
-  override def getCoinbase: IO[Address] =
-    miningConfig.coinbase.pure[IO]
-
-  override def submitWork(nonce: ByteVector, powHeaderHash: ByteVector, mixHash: ByteVector): IO[Boolean] = ???
+  override def getCoinbase: IO[Address] = miningConfig.coinbase.pure[IO]
 
   override def syncing: IO[Option[SyncingStatus]] =
     for {
@@ -182,12 +173,12 @@ class PublicApiImpl(
   override def getUncleCountByBlockNumber(blockParam: BlockParam): IO[Int] =
     for {
       block <- resolveBlock(blockParam)
-    } yield block.body.uncleNodesList.length
+    } yield block.body.ommerList.length
 
   override def getUncleCountByBlockHash(blockHash: ByteVector): IO[Int] =
     for {
       body <- history.getBlockBodyByHash(blockHash)
-    } yield body.map(_.uncleNodesList.length).getOrElse(-1)
+    } yield body.map(_.ommerList.length).getOrElse(-1)
 
   override def getBlockTransactionCountByNumber(blockParam: BlockParam): IO[Int] =
     resolveBlock(blockParam).map(_.body.transactionList.length)
@@ -225,10 +216,9 @@ class PublicApiImpl(
   override def getAccountTransactions(address: Address,
                                       fromBlock: BigInt,
                                       toBlock: BigInt): IO[List[SignedTransaction]] = {
-    val numBlocksToSearch = toBlock - fromBlock
     def collectTxs: PartialFunction[SignedTransaction, SignedTransaction] = {
-      case stx if SignedTransaction.getSender(stx).nonEmpty && SignedTransaction.getSender(stx).get == address => stx
-      case stx if stx.receivingAddress == address                                                              => stx
+      case stx if stx.senderAddress.nonEmpty && stx.senderAddress.get == address => stx
+      case stx if stx.receivingAddress == address                                => stx
     }
     for {
       blocks <- (fromBlock to toBlock).toList.traverse(history.getBlockByNumber)
@@ -236,7 +226,7 @@ class PublicApiImpl(
         case Some(block) => block.body.transactionList.collect(collectTxs)
       }.flatten
       pendingStxs <- txPool.getPendingTransactions
-      stxsFromPool = pendingStxs.map(_.stx).collect(collectTxs)
+      stxsFromPool = pendingStxs.keys.toList.collect(collectTxs)
     } yield stxsFromBlock ++ stxsFromPool
   }
 
@@ -252,12 +242,8 @@ class PublicApiImpl(
   private[jbok] def prepareTransaction(callTx: CallTx, blockParam: BlockParam): IO[SignedTransaction] =
     for {
       gasLimit <- getGasLimit(callTx, blockParam)
-      from <- OptionT
-        .fromOption[IO](callTx.from)
-        .getOrElseF(keyStore.listAccounts.map(_.head))
-      tx            = Transaction(0, callTx.gasPrice, gasLimit, callTx.to, callTx.value, callTx.data)
-      fakeSignature = CryptoSignature(0, 0, 0.toByte)
-    } yield SignedTransaction(tx, 0.toByte, ByteVector(0), ByteVector(0), from)
+      tx = Transaction(0, callTx.gasPrice, gasLimit, callTx.to, callTx.value, callTx.data)
+    } yield SignedTransaction(tx, history.chainId.toByte, 0.toByte, ByteVector(0), ByteVector(0))
 
   private[jbok] def getGasLimit(callTx: CallTx, blockParam: BlockParam): IO[BigInt] =
     if (callTx.gas.isDefined) {
@@ -293,9 +279,6 @@ class PublicApiImpl(
       case BlockParam.WithNumber(blockNumber) => getBlock(blockNumber)
       case BlockParam.Earliest                => getBlock(0)
       case BlockParam.Latest                  => history.getBestBlockNumber >>= getBlock
-      case BlockParam.Pending =>
-        ???
-//        OptionT(blockGenerator.getUnconfirmed.map(_.map(_.block))).getOrElseF(resolveBlock(BlockParam.Latest))
     }
   }
 }

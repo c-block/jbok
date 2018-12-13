@@ -16,8 +16,8 @@ import scodec.bits._
 import scala.concurrent.duration._
 
 class AuthHandshakerSpec extends JbokSpec {
-  val serverKey = Signature[ECDSA].generateKeyPair().unsafeRunSync()
-  val clientKey = Signature[ECDSA].generateKeyPair().unsafeRunSync()
+  val serverKey = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
+  val clientKey = Signature[ECDSA].generateKeyPair[IO]().unsafeRunSync()
   val addr      = new InetSocketAddress("localhost", 9003)
 
   implicit val I: RequestId[ByteVector] = RequestId.empty
@@ -25,7 +25,7 @@ class AuthHandshakerSpec extends JbokSpec {
 
   "AuthHandshakerSpec" should {
     "build auth connection" in {
-      val server = fs2.io.tcp
+      val server = fs2.io.tcp.Socket
         .server[IO](addr)
         .evalMap[IO, AuthHandshakeResult] { res =>
           for {
@@ -39,7 +39,7 @@ class AuthHandshakerSpec extends JbokSpec {
 
       val client =
         for {
-          conn       <- TcpUtil.socketToConnection[IO, Message](fs2.io.tcp.client[IO](addr), false)
+          conn       <- TcpUtil.socketToConnection[IO, Message](fs2.io.tcp.Socket.client[IO](addr), false)
           _          <- conn.start
           handshaker <- AuthHandshaker[IO](clientKey)
           result     <- handshaker.connect(conn, serverKey.public)
@@ -57,7 +57,7 @@ class AuthHandshakerSpec extends JbokSpec {
     }
 
     "fail if wrong remotePk" in {
-      val server = fs2.io.tcp
+      val server = fs2.io.tcp.Socket
         .server[IO](addr)
         .evalMap[IO, Unit] { res =>
           for {
@@ -72,7 +72,7 @@ class AuthHandshakerSpec extends JbokSpec {
 
       val client =
         for {
-          conn       <- TcpUtil.socketToConnection[IO, Message](fs2.io.tcp.client[IO](addr), false)
+          conn       <- TcpUtil.socketToConnection[IO, Message](fs2.io.tcp.Socket.client[IO](addr), false)
           _          <- conn.start
           handshaker <- AuthHandshaker[IO](clientKey)
           result     <- handshaker.connect(conn, clientKey.public)

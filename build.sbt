@@ -22,7 +22,7 @@ lazy val V = new {
   val fs2             = "1.0.0"
   val catsEffect      = "1.0.0"
   val catsCollections = "0.7.0"
-  val refined         = "0.9.3"
+  val scalacache      = "0.26.0"
 }
 
 lazy val jbok = project
@@ -30,10 +30,11 @@ lazy val jbok = project
   .aggregate(
     crypto.jvm,
     persistent.jvm,
-    core.jvm,
-    core.js
+    core.js,
+    core.jvm
   )
   .settings(noPublishSettings)
+
 
 lazy val common = crossProject(JSPlatform, JVMPlatform)
   .crossType(CrossType.Full)
@@ -47,15 +48,12 @@ lazy val common = crossProject(JSPlatform, JVMPlatform)
       "org.typelevel" %% "cats-collections-core" % V.catsCollections,
       "co.fs2"        %%% "fs2-core"             % V.fs2,
       "co.fs2"        %% "fs2-io"                % V.fs2,
-      // refined
-      "eu.timepit" %%% "refined"           % V.refined,
-      "eu.timepit" %%% "refined-cats"      % V.refined,
-      "eu.timepit" %%% "refined-scodec"    % V.refined,
-      "eu.timepit" %%% "refined-shapeless" % V.refined,
       // json
-      "io.circe" %%% "circe-core"    % V.circe,
-      "io.circe" %%% "circe-generic" % V.circe,
-      "io.circe" %%% "circe-parser"  % V.circe,
+      "io.circe" %%% "circe-core"       % V.circe,
+      "io.circe" %%% "circe-generic"    % V.circe,
+      "io.circe" %%% "circe-parser"     % V.circe,
+      "io.circe" %%% "circe-derivation" % "0.9.0-M5",
+      "org.planet42" %% "laika-core" % "0.10.0",
       // binary
       "org.scodec" %%% "scodec-bits"  % "1.1.5",
       "org.scodec" %%% "scodec-core"  % "1.10.3",
@@ -73,10 +71,14 @@ lazy val common = crossProject(JSPlatform, JVMPlatform)
       "com.github.pathikrit" %% "better-files" % "3.5.0",
       // command line
       "org.rogach" %%% "scallop" % "3.1.3",
+      // config
+      "com.github.pureconfig" %% "pureconfig" % "0.10.0",
       // test
-      "org.scalatest"  %%% "scalatest"               % "3.0.5"   % Test,
-      "org.scalacheck" %%% "scalacheck"              % "1.13.4"  % Test,
-      "eu.timepit"     %%% "refined-scalacheck_1.13" % V.refined % Test
+      "org.scalatest"  %%% "scalatest"  % "3.0.5"  % Test,
+      "org.scalacheck" %%% "scalacheck" % "1.13.4" % Test,
+      // jpbc
+      "it.unisa.dia.gas" %%% "jpbc-api" % "2.0.0"  from "https://raw.githubusercontent.com/YXX123/jpbc/master/jpbc-api-2.0.0.jar" ,
+      "it.unisa.dia.gas" %%% "jpbc-plaf" % "2.0.0" from "https://raw.githubusercontent.com/YXX123/jpbc/master/jpbc-plaf-2.0.0.jar",
     )
   )
 
@@ -212,8 +214,11 @@ lazy val persistent = crossProject(JSPlatform, JVMPlatform)
   .settings(
     name := "jbok-persistent",
     libraryDependencies ++= Seq(
-      "org.iq80.leveldb"          % "leveldb"        % "0.10",
-      "org.fusesource.leveldbjni" % "leveldbjni-all" % "1.8"
+      "org.iq80.leveldb"          % "leveldb"                 % "0.10",
+      "org.fusesource.leveldbjni" % "leveldbjni-all"          % "1.8",
+      "com.github.cb372"          %%% "scalacache-core"       % V.scalacache,
+      "com.github.cb372"          %% "scalacache-cats-effect" % V.scalacache,
+      "com.github.cb372"          %% "scalacache-caffeine"    % V.scalacache
     )
   )
   .dependsOn(common % CompileAndTest, codec)

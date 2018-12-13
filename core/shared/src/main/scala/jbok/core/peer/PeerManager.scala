@@ -5,13 +5,13 @@ import java.nio.channels.AsynchronousChannelGroup
 import cats.data.OptionT
 import cats.effect.concurrent.Ref
 import cats.effect.implicits._
-import cats.effect.{ConcurrentEffect, Timer}
+import cats.effect.{ConcurrentEffect, ContextShift, Timer}
 import cats.implicits._
 import fs2.Stream._
 import fs2._
 import fs2.concurrent.Queue
 import jbok.common.concurrent.PriorityQueue
-import jbok.core.config.Configs.PeerManagerConfig
+import jbok.core.config.Configs.PeerConfig
 import jbok.core.ledger.History
 import jbok.core.messages._
 import jbok.core.peer.PeerSelectStrategy.PeerSelectStrategy
@@ -26,24 +26,24 @@ object PeerErr {
 }
 
 abstract class PeerManager[F[_]](
-    val config: PeerManagerConfig,
+    val config: PeerConfig,
     val keyPair: KeyPair,
     val history: History[F],
     val incoming: Ref[F, Map[KeyPair.Public, Peer[F]]],
     val outgoing: Ref[F, Map[KeyPair.Public, Peer[F]]],
     val nodeQueue: PriorityQueue[F, PeerNode],
     val messageQueue: Queue[F, Request[F]]
-)(implicit F: ConcurrentEffect[F], T: Timer[F], AG: AsynchronousChannelGroup) {
+)(implicit F: ConcurrentEffect[F], CS: ContextShift[F], T: Timer[F], AG: AsynchronousChannelGroup, chainId: BigInt) {
   private[this] val log = org.log4s.getLogger("PeerManager")
 
-  val peerNode: PeerNode = PeerNode(keyPair.public, config.host, config.port)
+  val peerNode: PeerNode = PeerNode(keyPair.public, config.host, config.port, config.discoveryPort)
 
   def listen(
       bind: InetSocketAddress = config.bindAddr,
       maxQueued: Int = config.maxPendingPeers,
       maxOpen: Int = config.maxIncomingPeers
   ): Stream[F, Unit] =
-    fs2.io.tcp
+    fs2.io.tcp.Socket
       .serverWithLocalAddress[F](bind, maxQueued)
       .map {
         case Left(bound) =>
@@ -60,7 +60,7 @@ abstract class PeerManager[F[_]](
             _ <- peer.conn.reads
               .map(msg => Request(peer, msg))
               .to(messageQueue.enqueue)
-              .onFinalize(incoming.update(_ - peer.pk) *> F.delay(log.debug(s"${peer.id} disconnected")))
+              .onFinalize(incoming.update(_ - peer.pk) >> F.delay(log.debug(s"${peer.id} disconnected")))
           } yield ()
 
           stream.handleErrorWith {
@@ -82,7 +82,7 @@ abstract class PeerManager[F[_]](
       to: PeerNode,
   ): Stream[F, Unit] = {
     val connect0 = {
-      val res = io.tcp.client[F](to.addr, keepAlive = true, noDelay = true)
+      val res = io.tcp.Socket.client[F](to.tcpAddress, keepAlive = true, noDelay = true)
       val stream = for {
         conn <- eval(TcpUtil.socketToConnection[F, Message](res, false))
         _    <- eval(conn.start)
@@ -93,7 +93,7 @@ abstract class PeerManager[F[_]](
         _ <- peer.conn.reads
           .map(msg => Request(peer, msg))
           .to(messageQueue.enqueue)
-          .onFinalize(outgoing.update(_ - peer.pk) *> F.delay(log.debug(s"${peer.id} disconnected")))
+          .onFinalize(outgoing.update(_ - peer.pk) >> F.delay(log.debug(s"${peer.id} disconnected")))
       } yield ()
 
       stream.handleErrorWith {
@@ -119,7 +119,7 @@ abstract class PeerManager[F[_]](
 
   def addPeerNode(nodes: PeerNode*): F[Unit] =
     nodes.toList
-      .filterNot(_.addr == config.bindAddr)
+      .filterNot(_.tcpAddress == config.bindAddr)
       .distinct
       .traverse(node => nodeQueue.enqueue1(node, node.peerType.priority))
       .void
@@ -144,7 +144,7 @@ abstract class PeerManager[F[_]](
     for {
       genesis <- history.genesisHeader
       number  <- history.getBestBlockNumber
-    } yield Status(history.chainId, genesis.hash, number)
+    } yield Status(chainId, genesis.hash, number)
 
   private[jbok] def handshakeIncoming(conn: Connection[F, Message]): F[Peer[F]]
 
