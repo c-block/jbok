@@ -184,7 +184,6 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
       case None => true
       case Some(_) => false
     }
-
 }
 
 

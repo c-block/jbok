@@ -58,11 +58,6 @@ lazy val common = crossProject(JSPlatform, JVMPlatform)
       "org.typelevel" %% "cats-collections-core" % V.catsCollections,
       "co.fs2"        %%% "fs2-core"             % V.fs2,
       "co.fs2"        %% "fs2-io"                % V.fs2,
-      // refined
-      "eu.timepit" %%% "refined"           % V.refined,
-      "eu.timepit" %%% "refined-cats"      % V.refined,
-      "eu.timepit" %%% "refined-scodec"    % V.refined,
-      "eu.timepit" %%% "refined-shapeless" % V.refined,
       // json
       "io.circe" %%% "circe-core"       % V.circe,
       "io.circe" %%% "circe-generic"    % V.circe,
@@ -89,12 +84,9 @@ lazy val common = crossProject(JSPlatform, JVMPlatform)
       "org.scalatest"  %%% "scalatest"  % "3.0.5"  % Test,
       "org.scalacheck" %%% "scalacheck" % "1.13.4" % Test,
       // scalajs-stubs
-      "org.scala-js" %% "scalajs-stubs" % "0.6.26"
-      "org.scalatest"  %%% "scalatest"  % "3.0.5"  % Test,
-      "org.scalacheck" %%% "scalacheck" % "1.13.4" % Test,
-      // jpbc
+      "org.scala-js" %% "scalajs-stubs" % "0.6.26",
       "it.unisa.dia.gas" %%% "jpbc-api" % "2.0.0"  from "https://raw.githubusercontent.com/YXX123/jpbc/master/jpbc-api-2.0.0.jar" ,
-      "it.unisa.dia.gas" %%% "jpbc-plaf" % "2.0.0" from "https://raw.githubusercontent.com/YXX123/jpbc/master/jpbc-plaf-2.0.0.jar",
+      "it.unisa.dia.gas" %%% "jpbc-plaf" % "2.0.0" from "https://raw.githubusercontent.com/YXX123/jpbc/master/jpbc-plaf-2.0.0.jar"
     ) ++ dropwizard
   )
 
