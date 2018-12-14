@@ -1,9 +1,8 @@
 package jbok.core.consensus.vrf
 
-import cats.effect.{IO}
+import cats.effect.IO
 import jbok.core.ledger.TypedBlock.ReceivedBlock
 import jbok.core.models.Address
-import cats.implicits._
 import Bls._
 
 /**
@@ -30,17 +29,18 @@ trait RandomBeacon {
   val secretKey: SecretKey
   val publicKey: PublicKey = secretKey.publicKey
 
-  implicit object ExchangeGroupOrdering extends Ordering[ExchangeGroup] {
-    override def compare(p1: ExchangeGroup, p2: ExchangeGroup): Int = {
-      -p1.sharedCombinedSeckey.publicKey.address.bytes.toArray.map("%02X" format _).
-        mkString.compareTo(p2.sharedCombinedSeckey.publicKey.address.bytes.toArray.map("%02X" format _).mkString)
-    }
-  }
 
   implicit object ReceivedBlockOrdering extends Ordering[ReceivedBlock[IO]] {
     override def compare(p1: ReceivedBlock[IO], p2: ReceivedBlock[IO]): Int = {
       -p1.block.header.beneficiary.toArray.map("%02X" format _).mkString
         .compareTo(p2.block.header.beneficiary.toArray.map("%02X" format _).mkString)
+    }
+  }
+
+  implicit object AddressOrdering extends Ordering[Address] {
+    override def compare(p1: Address, p2: Address): Int = {
+      -p1.bytes.toArray.map("%02X" format _).
+        mkString.compareTo(p2.bytes.toArray.map("%02X" format _).mkString)
     }
   }
 
@@ -57,14 +57,23 @@ trait RandomBeacon {
     * 生成分组
     * 根据随机数的perm
     */
-  def makeGroups(config: Config): List[Group]
+  def makeGroups(config: Config): List[Group] = {
+    val nodes = config.nodes.toList.sortBy(_.pubkey.address)
+    val groups = for {
+      i <- 0 until config.m
+      members = config.rand.Deri(i).randPerm(config.n, config.k).map(i => nodes(i)).toList
+      group = Group(members, config.k, config.rand)
+
+    } yield group
+    groups.toList
+  }
 
   /**
     * 选择出块的组
     */
   def chooseGroup(groups: List[ExchangeGroup], rand: Rand): ExchangeGroup = {
     val index = rand.int.mod(groups.length)
-    val groupsSorted = groups.sorted
+    val groupsSorted = groups.sortBy(_.group.address)
     groupsSorted(index.toInt)
   }
 

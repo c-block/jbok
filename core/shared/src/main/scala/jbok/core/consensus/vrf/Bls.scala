@@ -22,6 +22,21 @@ case class Rand(bytes: ByteVector) {
   //连接整数
   def Deri(i: Int): Rand = this.Ders(i.toString)
 
+  //求余
+  def modulo(m: Int): Int = int.mod(m).toInt
+
+  //得到一个随机数组,用于分组
+  def randPerm(n: Int, k: Int): Array[Int] = {
+    val l = (0 until n).toArray
+    (0 until k).foreach(i => {
+      val j = this.Deri(i).modulo(n - i) + i
+      val m = l(i)
+      l(i) = l(j)
+      l(j) = m
+    })
+    l.slice(0, k)
+  }
+
 }
 
 trait Bls
@@ -64,8 +79,6 @@ object Bls {
   }
 
 
-
-
   /**
     * 1. 得到密钥(bytes) => SecretKey ，Zr域
     */
@@ -106,7 +119,7 @@ object Bls {
     * 7. 生成拉格朗日签名(List<Address>:X轴，List<Signature>：Y轴)=> Signature
     */
   def lagrangeSignature(sigMap: Map[Address, Signature]): Signature =
-    Interpolation(sigMap.map(s=>Point(BigInt(s._1.bytes.toArray),BigInt(s._2.bytes.toArray))).toList).intercept
+    Interpolation(sigMap.map(s => Point(BigInt(s._1.bytes.toArray), BigInt(s._2.bytes.toArray))).toList).intercept
 
 
   //10 . 获得G2 元素
@@ -130,26 +143,26 @@ object Bls {
 
 }
 
-case class Point(x:BigInt,y:BigInt)
-case class Interpolation(points:List[Point]) {
+case class Point(x: BigInt, y: BigInt)
+
+case class Interpolation(points: List[Point]) {
   /**
     * 得到拉格朗日求值之后的签名
     */
-  def intercept:Signature={
+  def intercept: Signature = {
     Signature(
-      points.zipWithIndex.foldLeft(Bls.getG1Element(0))((result, p)=>
+      points.zipWithIndex.foldLeft(Bls.getG1Element(0))((result, p) =>
         result.add(Bls.getG1Element(p._1.y).mul(lagrangeCoefficient(p._2))
-    )).toBytes
+        )).toBytes
     )
   }
 
-  def lagrangeCoefficient(i: Int):Element=
-    points.zipWithIndex.filter(p => p._2!=i).foldLeft(Bls.getZrElement(1))((result,p)=>
+  def lagrangeCoefficient(i: Int): Element =
+    points.zipWithIndex.filter(p => p._2 != i).foldLeft(Bls.getZrElement(1))((result, p) =>
       result.mul(Bls.getZrElement(p._2).div(Bls.getZrElement(p._2).sub(Bls.getZrElement(points(i).x)))))
 
 
-
-  def product(xs: List[Element]):Element =
-    xs.foldLeft(Bls.getZrElement(1))((result,elem)=>result.mul(elem))
+  def product(xs: List[Element]): Element =
+    xs.foldLeft(Bls.getZrElement(1))((result, elem) => result.mul(elem))
 
 }

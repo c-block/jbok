@@ -82,12 +82,12 @@ class KeyValueDBBenchmark extends JbokBenchmark {
     dbMem.writeBatchRaw(put, Nil).unsafeRunSync()
   }
 
-  @TearDown
-  def tearDown(): Unit = {
-    dbIq80.close.unsafeRunSync()
-    dbJni.close.unsafeRunSync()
-    dbMem = KeyValueDB.inmem[IO].unsafeRunSync()
-    LevelDB.destroy[IO](dirIq80.pathAsString, useJni = false).unsafeRunSync()
-    LevelDB.destroy[IO](dirJni.pathAsString, useJni = true).unsafeRunSync()
-  }
+//  @TearDown
+//  def tearDown(): Unit = {
+//    dbIq80.close.unsafeRunSync()
+//    dbJni.close.unsafeRunSync()
+//    dbMem = KeyValueDB.inmem[IO].unsafeRunSync()
+//    LevelDB.destroy[IO](dirIq80.pathAsString, useJni = false).unsafeRunSync()
+//    LevelDB.destroy[IO](dirJni.pathAsString, useJni = true).unsafeRunSync()
+//  }
 }

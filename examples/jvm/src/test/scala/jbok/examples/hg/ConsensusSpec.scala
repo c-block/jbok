@@ -31,7 +31,7 @@ trait ConsensusFixture extends Generator {
     (x: Event) => {
       val o = pool.getEventByHash(x.hash).unsafeRunSync()
       List(
-        DotAttr("label", s"${Cast.hash2name(o.body.creator)}-${o.info.round}-${o.body.index}"),
+//        DotAttr("label", s"${Cast.hash2name(o.body.creator)}-${o.info.round}-${o.body.index}"),
         DotAttr("style", "filled"),
         DotAttr("fillcolor", color(o))
       )

@@ -32,7 +32,7 @@ import Bls._
   * 6.生成创世块(Set(PublicKey:节点),sig:固定的随机数，m:多少组,n:组大小,k:阈值，List[exchangeGroup])=>Genesis
   *
   */
-case class Config(nodes: Set[PublicKey], signature: Signature, m: Int, n: Int, k: Int)
+case class Config(nodes: Set[Node], rand: Rand, m: Int, n: Int, k: Int)
 
 //分享的密钥份额
 case class Shares(shareSecKeys: Map[Address, SecretKey], sharePubKeys: List[PublicKey])
@@ -67,19 +67,20 @@ case class Node(pubkey: PublicKey, pop: Signature) {
 sealed trait TypedGroup
 
 // todo sharePublicKeys 是 用于校验 签名份额的
-case class Group(members: List[Node], threshold: Int, address: Address, rand: Rand, receivedShares: Map[Address, SecretKey], sharePublicKeys: Map[Address, PublicKey]) extends TypedGroup {
+case class Group(members: List[Node], threshold: Int, rand: Rand, receivedShares: Map[Address, SecretKey] = Map.empty, sharePublicKeys: Map[Address, PublicKey] = Map.empty) extends TypedGroup {
 
+  val address: Address = ???
   val priVec: List[SecretKey] = (0 until threshold).map(i => SecretKey(Bls.getZrElement(rand.Deri(i)).toBytes)).toList
   val pubVec: List[PublicKey] = priVec.map(seckey => seckey.publicKey)
 
   /**
     * 生成密钥份额,根据组的随机数种子
     */
-  def generateShares(): Shares = {
+  def generateShares: Shares =
     Shares(shareSecKeys = members.map(node => node.pubkey.address)
       .map(address => (address -> generateShare(address))).toMap, sharePubKeys = pubVec
     )
-  }
+
 
   /**
     * 根据地址生成密钥份额
@@ -141,7 +142,7 @@ case class Group(members: List[Node], threshold: Int, address: Address, rand: Ra
 // 分组成功后就有了组公钥，私钥
 case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages: List[Message]) extends TypedGroup {
 
-  val sharedPublicCombinedKey: PublicKey = sharedCombinedSeckey.publicKey
+  def sharedPublicCombinedKey: PublicKey = sharedCombinedSeckey.publicKey
 
   /**
     * 组签名,贡献签名份额， 1.共享密钥签名
@@ -156,13 +157,13 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
     * todo  Ref ，抛到上层
     * 收集block签名 ，调用 verifySigShareBlock ，验证通过之后放入到 Cache中
     */
-//    def collectBlockSigs(message: Message): IO[Unit] = {
-//       verifySignedShareBlock(message) match {
-//         case false => this
-//         case true if messages.length>=group.threshold=>if(verifySharedSignatures)
-//         case _ =>
-//       }
-//    }
+  //    def collectBlockSigs(message: Message): IO[Unit] = {
+  //       verifySignedShareBlock(message) match {
+  //         case false => IO.pure()
+  //         case true if messages.length>=group.threshold=>if(verifySharedSignatures)
+  //         case _ =>
+  //       }
+  //    }
 
   /**
     * 验证某一份share签名 0.得到节点公钥 1.验证节点sig 2.验证节点sig份额

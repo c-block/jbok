@@ -24,21 +24,23 @@ trait Generator {
       n: Int,
       g: MGraph[Event, DiEdge] = MGraph.empty,
       lastEvents: Map[ByteVector, Event] = Map.empty): Graph[Event, DiEdge] = {
-    if (size <= 0) {
+//    if (size <= 0) {
+//      g
+//    }
       g
-    } else if (g.order == 0) {
-      g += Consensus.genesis
-      val creators = (1 to n).toList.map(i => Cast.name2hash(Cast.names(i)))
-      val newEvents = creators.map(c => emptyEvent(Consensus.genesis, Consensus.genesis, c, g.nodes.length + 1L))
-      newEvents.foreach(e => g += (Consensus.genesis ~> e))
-      genGraph(size - (n + 1), n, g, newEvents.map(x => x.body.creator -> x).toMap)
-    } else {
-      val Vector(sender, receiver) = Random.shuffle(1 to n).toVector.take(2)
-      val op = lastEvents(Cast.name2hash(Cast.names(sender)))
-      val sp = lastEvents(Cast.name2hash(Cast.names(receiver)))
-      val newEvent = emptyEvent(sp, op, sp.body.creator, g.nodes.length + 1L)
-      g += (sp ~> newEvent, op ~> newEvent)
-      genGraph(size - 1, n, g, lastEvents + (sp.body.creator -> newEvent))
-    }
+//    } else if (g.order == 0) {
+//      g += Consensus.genesis
+//      val creators = (1 to n).toList.map(i => Cast.name2hash(Cast.names(i)))
+//      val newEvents = creators.map(c => emptyEvent(Consensus.genesis, Consensus.genesis, c, g.nodes.length + 1L))
+//      newEvents.foreach(e => g += (Consensus.genesis ~> e))
+//      genGraph(size - (n + 1), n, g, newEvents.map(x => x.body.creator -> x).toMap)
+//    } else {
+//      val Vector(sender, receiver) = Random.shuffle(1 to n).toVector.take(2)
+//      val op = lastEvents(Cast.name2hash(Cast.names(sender)))
+//      val sp = lastEvents(Cast.name2hash(Cast.names(receiver)))
+//      val newEvent = emptyEvent(sp, op, sp.body.creator, g.nodes.length + 1L)
+//      g += (sp ~> newEvent, op ~> newEvent)
+//      genGraph(size - 1, n, g, lastEvents + (sp.body.creator -> newEvent))
+//    }
   }
 }
