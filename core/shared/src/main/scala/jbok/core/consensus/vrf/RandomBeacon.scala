@@ -4,6 +4,7 @@ import cats.effect.{IO}
 import jbok.core.ledger.TypedBlock.ReceivedBlock
 import jbok.core.models.Address
 import cats.implicits._
+import Bls._
 
 /**
   * 选择组并出块：根据随机数选择出块的组，和要出的块

@@ -4,6 +4,7 @@ import cats.effect.{IO}
 import jbok.core.ledger.TypedBlock.ReceivedBlock
 import jbok.core.models.{Address, BlockHeader}
 import cats.implicits._
+import Bls._
 
 
 /**
@@ -146,8 +147,8 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
     * 组签名,贡献签名份额， 1.共享密钥签名
     */
   def signShareBlock(block: ReceivedBlock[IO], secretKey: SecretKey): Message = {
-    val sharedSig = Bls.sign(Bls.getHashed(block.block.header.mixHash), sharedCombinedSeckey)
-    val sig = Bls.sign(Bls.getHashed(block.block.header.mixHash), secretKey)
+    val sharedSig = Bls.sign(block.block.header.mixHash, sharedCombinedSeckey)
+    val sig = Bls.sign(block.block.header.mixHash, secretKey)
     Message(sharedSig, block.block.header, secretKey.publicKey.address, sig)
   }
 
@@ -155,13 +156,13 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
     * todo  Ref ，抛到上层
     * 收集block签名 ，调用 verifySigShareBlock ，验证通过之后放入到 Cache中
     */
-    def collectBlockSigs(message: Message): IO[Unit] = {
-       verifySignedShareBlock(message) match {
-         case false => this
-         case true if messages.length>=group.threshold=>if(verifySharedSignatures)
-         case _ =>
-       }
-    }
+//    def collectBlockSigs(message: Message): IO[Unit] = {
+//       verifySignedShareBlock(message) match {
+//         case false => this
+//         case true if messages.length>=group.threshold=>if(verifySharedSignatures)
+//         case _ =>
+//       }
+//    }
 
   /**
     * 验证某一份share签名 0.得到节点公钥 1.验证节点sig 2.验证节点sig份额
@@ -169,9 +170,9 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
   def verifySignedShareBlock(message: Message): Boolean = {
     group.members.map(node => node.pubkey).find(pub => pub.address == message.from) match {
       case None => false
-      case Some(t) => Bls.verify(Bls.getHashed(message.blockHeader.mixHash), t, message.signature) match {
+      case Some(t) => Bls.verify(message.blockHeader.mixHash, t, message.signature) match {
         case false => false
-        case true => Bls.verify(Bls.getHashed(message.blockHeader.mixHash), group.sharePublicKeys(message.from), message.sharedSignature)
+        case true => Bls.verify(message.blockHeader.mixHash, group.sharePublicKeys(message.from), message.sharedSignature)
       }
     }
   }
