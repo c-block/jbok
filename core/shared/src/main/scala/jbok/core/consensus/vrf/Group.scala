@@ -1,10 +1,11 @@
 package jbok.core.consensus.vrf
 
-import cats.effect.{IO}
+import cats.effect.IO
 import jbok.core.ledger.TypedBlock.ReceivedBlock
 import jbok.core.models.{Address, BlockHeader}
-import cats.implicits._
 import Bls._
+import scodec.bits.ByteVector
+import jbok.crypto._
 
 
 /**
@@ -32,7 +33,7 @@ import Bls._
   * 6.生成创世块(Set(PublicKey:节点),sig:固定的随机数，m:多少组,n:组大小,k:阈值，List[exchangeGroup])=>Genesis
   *
   */
-case class Config(nodes: Set[Node], rand: Rand, m: Int, n: Int, k: Int)
+case class Config(nodes: Set[Node], rand: Rand, m: Int = 5, n: Int = 3, k: Int = 2)
 
 //分享的密钥份额
 case class Shares(shareSecKeys: Map[Address, SecretKey], sharePubKeys: List[PublicKey])
@@ -50,10 +51,13 @@ case class Node(pubkey: PublicKey, pop: Signature) {
     */
   def verifyShare(publicKeyVec: List[PublicKey], secretShareKey: SecretKey): Boolean = {
     //todo 拆一下
-    publicKeyVec.map(a => Bls.getG2Element(a.bytes.toArray)).reverse.takeRight(publicKeyVec.length - 1)
-      .foldLeft(Bls.getG2Element(publicKeyVec(publicKeyVec.length - 1).bytes.toArray))((result, publicKey) =>
-        result.mulZn(Bls.getZrElement(pubkey.address.bytes.toArray).add(publicKey))).
-      toBytes.equals(secretShareKey.publicKey.bytes.toArray)
+    val pubSecR = publicKeyVec.map(a => a.element).reverse
+    val addressE = Bls.getZrElement(pubkey.address.bytes)
+    val public = pubSecR.takeRight(publicKeyVec.length - 1)
+      .foldLeft(pubSecR(0))((result, publicKey) =>
+        result.mulZn(addressE).add(publicKey))
+    val publicShare = secretShareKey.publicKey.element
+    public.equals(publicShare)
 
   }
 
@@ -69,9 +73,18 @@ sealed trait TypedGroup
 // todo sharePublicKeys 是 用于校验 签名份额的
 case class Group(members: List[Node], threshold: Int, rand: Rand, receivedShares: Map[Address, SecretKey] = Map.empty, sharePublicKeys: Map[Address, PublicKey] = Map.empty) extends TypedGroup {
 
-  val address: Address = ???
-  val priVec: List[SecretKey] = (0 until threshold).map(i => SecretKey(Bls.getZrElement(rand.Deri(i)).toBytes)).toList
-  val pubVec: List[PublicKey] = priVec.map(seckey => seckey.publicKey)
+  implicit object AddressOrdering extends Ordering[Address] {
+    override def compare(p1: Address, p2: Address): Int = {
+      -p1.bytes.toArray.map("%02X" format _).
+        mkString.compareTo(p2.bytes.toArray.map("%02X" format _).mkString)
+    }
+  }
+
+  def address: Address = Address(members.map(node => node.pubkey.address).sorted.foldLeft(ByteVector.empty)((result, add) => result ++ add.bytes).kec256)
+
+  def priVec: List[SecretKey] = (0 until threshold).map(i => SecretKey(rand.Deri(i).bytes)).toList
+
+  def pubVec: List[PublicKey] = priVec.map(seckey => seckey.publicKey)
 
   /**
     * 生成密钥份额,根据组的随机数种子
@@ -100,8 +113,8 @@ case class Group(members: List[Node], threshold: Int, rand: Rand, receivedShares
     * publicKeys = [a0,a1,a(k-1)]对应的公钥数组
     */
   def aggregatePublicKeys(address: Address, publicKeys: List[PublicKey]): PublicKey = {
-    PublicKey(publicKeys.map(a => Bls.getG2Element(a.bytes.toArray)).reverse.takeRight(publicKeys.length - 1)
-      .foldLeft(Bls.getG2Element(publicKeys(publicKeys.length - 1).bytes.toArray))((result, publicKey) =>
+    PublicKey(publicKeys.map(a => a.element).reverse.takeRight(publicKeys.length - 1)
+      .foldLeft(publicKeys(publicKeys.length - 1).element)((result, publicKey) =>
         result.mulZn(Bls.getZrElement(address.bytes.toArray).add(publicKey))).toBytes)
   }
 
@@ -139,10 +152,18 @@ case class Group(members: List[Node], threshold: Int, rand: Rand, receivedShares
 
 }
 
+
 // 分组成功后就有了组公钥，私钥
-case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages: List[Message]) extends TypedGroup {
+case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages: List[Message] = List.empty) extends TypedGroup {
 
   def sharedPublicCombinedKey: PublicKey = sharedCombinedSeckey.publicKey
+
+  def groupPublicKey: PublicKey = {
+    val elments = group.members.map(node => node.pubkey.element)
+    val e = elments.foldLeft(Bls.getG2ElementOne)((result, pub) => result.mul(pub))
+    PublicKey(e.toBytes)
+  }
+
 
   /**
     * 组签名,贡献签名份额， 1.共享密钥签名
@@ -157,23 +178,26 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
     * todo  Ref ，抛到上层
     * 收集block签名 ，调用 verifySigShareBlock ，验证通过之后放入到 Cache中
     */
-  //    def collectBlockSigs(message: Message): IO[Unit] = {
-  //       verifySignedShareBlock(message) match {
-  //         case false => IO.pure()
-  //         case true if messages.length>=group.threshold=>if(verifySharedSignatures)
-  //         case _ =>
-  //       }
+  //  def collectBlockSigs(message: Message): Boolean = {
+  //    verifySignedShareMessage(message) match {
+  //      case false => false
+  //      case true if messages.length >= group.threshold => if (verifySharedSignatures)
+  //      case _ =>
   //    }
+  //  }
 
   /**
     * 验证某一份share签名 0.得到节点公钥 1.验证节点sig 2.验证节点sig份额
     */
-  def verifySignedShareBlock(message: Message): Boolean = {
+  def verifySignedShareMessage(message: Message): Boolean = {
     group.members.map(node => node.pubkey).find(pub => pub.address == message.from) match {
       case None => false
       case Some(t) => Bls.verify(message.blockHeader.mixHash, t, message.signature) match {
         case false => false
-        case true => Bls.verify(message.blockHeader.mixHash, group.sharePublicKeys(message.from), message.sharedSignature)
+        case true => group.sharePublicKeys.get(message.from) match {
+          case None => false
+          case Some(value) => Bls.verify(message.blockHeader.mixHash, value, message.sharedSignature)
+        }
       }
     }
   }
@@ -182,10 +206,30 @@ case class ExchangeGroup(group: Group, sharedCombinedSeckey: SecretKey, messages
     * 收集到所有签名份额后，验证
     */
   def verifySharedSignatures: Boolean =
-    messages.find(message => verifySignedShareBlock(message) == false) match {
-      case None => true
-      case Some(_) => false
+    messages.length >= group.threshold match {
+      case false => false
+      case true => {
+        val lagSig = Bls.lagrangeSignature(messages.takeRight(group.threshold).map(message => (message.from -> message.sharedSignature)).toMap)
+        Bls.verify(messages(0).blockHeader.mixHash, groupPublicKey, lagSig)
+      }
     }
+
+  /**
+    * 组的共享的公钥份额是自己算出来的，只要算前threshold个
+    *  第i个人的公钥组 i[a0,a1,a2....,a(k-1)]
+    *  所有人的公钥匙组对j算 (i[a0,a1,a2....,a(k-1)],j) ...  (i+1[a0,a1,a2....,a(k-1)],j)
+    *  相乘即可得到 j 为组得到的公钥
+    */
+  def verifyGroupFormed: Boolean = {
+    group.sharePublicKeys.size == group.threshold match {
+      case false => false
+      case true=>{
+        val pubKey=Bls.lagrangePublicKey(group.sharePublicKeys.takeRight(group.threshold))
+        pubKey.equals(groupPublicKey)
+      }
+    }
+  }
+
 }
 
 

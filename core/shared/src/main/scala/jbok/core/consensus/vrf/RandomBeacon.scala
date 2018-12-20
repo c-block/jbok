@@ -4,6 +4,7 @@ import cats.effect.IO
 import jbok.core.ledger.TypedBlock.ReceivedBlock
 import jbok.core.models.Address
 import Bls._
+import scodec.bits.ByteVector
 
 /**
   * 选择组并出块：根据随机数选择出块的组，和要出的块
@@ -25,8 +26,7 @@ import Bls._
   * 7.组内签名校验(List[SignedSharedBlock],exchangeGroup)=> (Boolean ,signedBlock)
   * 8.if true -> 广播(signedBlock) ，else ->丢弃
   */
-trait RandomBeacon {
-  val secretKey: SecretKey
+case class RandomBeacon(secretKey: SecretKey) {
   val publicKey: PublicKey = secretKey.publicKey
 
 
@@ -43,6 +43,14 @@ trait RandomBeacon {
         mkString.compareTo(p2.bytes.toArray.map("%02X" format _).mkString)
     }
   }
+
+  /**
+    * 个人签名
+    */
+  def sign(data:ByteVector):Signature=Bls.sign(data,secretKey)
+
+  def validate(data:ByteVector,signature: Signature):Boolean=Bls.verify(data,publicKey,signature)
+
 
   /**
     * 判断是否属于出块的组
@@ -94,17 +102,17 @@ trait RandomBeacon {
   /**
     * 分发密钥
     */
-  def sendShares(group: Group, shares: Shares): IO[Unit]
+  def sendShares(group: Group, shares: Shares): IO[Unit]=IO.pure()
 
   /**
     * 广播区块
     */
-  def broadcastBlock(block: ReceivedBlock[IO]): IO[Unit]
+  def broadcastBlock(block: ReceivedBlock[IO]): IO[Unit]=IO.pure()
 
   /**
     * 发送由自身签名的
     */
-  def sendSignedSharedMessage(message: Message): IO[Unit]
+  def sendSignedSharedMessage(message: Message): IO[Unit]=IO.pure()
 
 }
 

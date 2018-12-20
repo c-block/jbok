@@ -7,7 +7,7 @@ import jbok.crypto._
 import it.unisa.dia.gas.jpbc.Element
 import it.unisa.dia.gas.jpbc.Pairing
 import it.unisa.dia.gas.plaf.jpbc.pairing.PairingFactory
-import jbok.core.consensus.vrf.Bls.Signature
+import jbok.core.consensus.vrf.Bls.{PublicKey, Signature}
 
 
 case class Rand(bytes: ByteVector) {
@@ -39,15 +39,26 @@ case class Rand(bytes: ByteVector) {
 
 }
 
+object Rand {
+  def apply(bytes: Array[Byte]): Rand = new Rand(ByteVector(bytes))
+}
+
 trait Bls
 
 object Bls {
-  //todo: add resources files
   val pairing: Pairing = PairingFactory.getPairing("bls/a_181_603.properties")
-  val systemParameters: Element = pairing.getG2.newRandomElement
+  val g2: Array[Byte] = ByteVector.fromHex("06BF2B690D3C79EBC7020D59B9A47816806400428E4FD45752B0933F66FD3545" +
+    "4FC8F7032A3539B000CB19402E82AC1353F338820F1DEB6402916BFFE0E2CF41B4273D9B8DB151BD9197A2" +
+    "3615E0F368017BC09CF8A25343A5DDD8364D522AB639519BD3C0ED1843D77790B6DA1549E93E081042ADD5A5" +
+    "502F9D63F1632E52905E17E5077860FB020ADCF3999D1902965D9E94C4B8464023").get.toArray
+  val systemParameters: Element = pairing.getG2.newElementFromBytes(g2)
+
+  case class KeyPair(secretKey: SecretKey, publicKey: PublicKey)
 
   case class SecretKey(bytes: ByteVector) {
-    def publicKey: PublicKey = PublicKey(ByteVector(Bls.systemParameters.duplicate().powZn(Bls.getZrElement(bytes.toArray)).toBytes))
+    def publicKey: PublicKey = PublicKey(Bls.systemParameters.duplicate().powZn(Bls.getZrElement(bytes.toArray)).toBytes)
+
+    def pop: Signature = Bls.sign(publicKey.bytes, this)
 
     def element: Element = pairing.getZr.newElementFromBytes(bytes.toArray)
   }
@@ -67,7 +78,9 @@ object Bls {
   }
 
   case class HashedG1(bytes: ByteVector) {
-    def element: Element = pairing.getG1.newElementFromBytes(bytes.toArray)
+    val bytesArr = bytes.toArray
+
+    def element: Element = pairing.getG1.newElementFromHash(bytesArr, 0, bytesArr.length)
   }
 
   case class Signature(bytes: ByteVector) {
@@ -113,13 +126,14 @@ object Bls {
   /**
     * 6. 生成拉格朗日公钥(List<Address>:拉格朗日对应的X轴,List<PublickKey>:拉格朗日对应的Y轴,t：阈值)=>PublicKey
     */
-  def lagrangePubkey(addresses: List[Address], publicKeys: List[PublicKey]): PublicKey = PublicKey(bytes = ByteVector.empty)
+  def lagrangePublicKey(pubMap: Map[Address, PublicKey]): PublicKey =
+    Interpolation(pubMap.map(s => Point((BigInt(s._1.bytes.toArray).abs), (BigInt(s._2.bytes.toArray).abs))).toList).interceptPublicKey
 
   /**
     * 7. 生成拉格朗日签名(List<Address>:X轴，List<Signature>：Y轴)=> Signature
     */
   def lagrangeSignature(sigMap: Map[Address, Signature]): Signature =
-    Interpolation(sigMap.map(s => Point(BigInt(s._1.bytes.toArray), BigInt(s._2.bytes.toArray))).toList).intercept
+    Interpolation(sigMap.map(s => Point((BigInt(s._1.bytes.toArray).abs), (BigInt(s._2.bytes.toArray).abs))).toList).interceptSignature
 
 
   //10 . 获得G2 元素
@@ -127,12 +141,19 @@ object Bls {
 
   def getG2Element(bigInt: BigInt): Element = getG2Element(bigInt.toByteArray)
 
+  def getG2ElementZero: Element = pairing.getG2.newZeroElement
+
+  def getG2ElementOne: Element = pairing.getG2.newOneElement
+
   //11 .获得G1 元素
   def getG1Element(bytes: Array[Byte]): Element = pairing.getG1.newElementFromBytes(bytes)
 
   def getG1Element(bigInt: BigInt): Element = getG1Element(bigInt.toByteArray)
 
+  def getG1ElementZero: Element = pairing.getG1.newZeroElement
+
   //12 .获得Zr元素
+
   def getZrElement(bytes: Array[Byte]): Element = pairing.getZr.newElementFromBytes(bytes)
 
   def getZrElement(bigInt: BigInt): Element = getZrElement(bigInt.toByteArray)
@@ -140,6 +161,10 @@ object Bls {
   def getZrElement(rand: Rand): Element = getZrElement(rand.bytes.toArray)
 
   def getZrElement(bytes: ByteVector): Element = getZrElement(bytes.toArray)
+
+  def getZrElementZero: Element = pairing.getZr.newZeroElement
+
+  def getZrElementOne: Element = pairing.getZr.newOneElement
 
 }
 
@@ -149,20 +174,31 @@ case class Interpolation(points: List[Point]) {
   /**
     * 得到拉格朗日求值之后的签名
     */
-  def intercept: Signature = {
+  def interceptSignature: Signature = {
+//    val xx=points.map(point=>point.x.toBigInteger.abs->point.y.toBigInteger.abs)
     Signature(
-      points.zipWithIndex.foldLeft(Bls.getG1Element(0))((result, p) =>
-        result.add(Bls.getG1Element(p._1.y).mul(lagrangeCoefficient(p._2))
+      points.zipWithIndex.foldLeft(Bls.getG1ElementZero)((result, p) =>
+        result.add(Bls.getG1Element(p._1.y).mulZn(lagrangeCoefficient(p._2))
         )).toBytes
     )
   }
 
-  def lagrangeCoefficient(i: Int): Element =
-    points.zipWithIndex.filter(p => p._2 != i).foldLeft(Bls.getZrElement(1))((result, p) =>
-      result.mul(Bls.getZrElement(p._2).div(Bls.getZrElement(p._2).sub(Bls.getZrElement(points(i).x)))))
+  def interceptPublicKey: PublicKey = {
+    //    val xx=points.map(point=>point.x.toBigInteger.abs->point.y.toBigInteger.abs)
+    PublicKey(
+      points.zipWithIndex.foldLeft(Bls.getG2ElementZero)((result, p) =>
+        result.add(Bls.getG2Element(p._1.y).mulZn(lagrangeCoefficient(p._2))
+        )).toBytes
+    )
+  }
 
+  def lagrangeCoefficient(i: Int): Element = {
+    val temp=points.zipWithIndex.filter(p => p._2 != i)
+      .map( pair => (Bls.getZrElement(pair._1.x).div(Bls.getZrElement(pair._1.x).sub(Bls.getZrElement(points(i).x)))))
+    product(temp)
+  }
 
   def product(xs: List[Element]): Element =
-    xs.foldLeft(Bls.getZrElement(1))((result, elem) => result.mul(elem))
+    xs.foldLeft(Bls.getZrElementOne)((result, elem) => result.mul(elem))
 
 }
