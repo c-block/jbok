@@ -2,6 +2,8 @@ package jbok.core
 
 import cats.effect.IO
 import cats.effect.concurrent.{Deferred, Ref}
+import jbok.codec.rlp.RlpCodec
+import jbok.codec.rlp.implicits._
 import com.typesafe.config.Config
 import jbok.common.execution._
 import jbok.common.testkit._
@@ -127,15 +129,11 @@ object testkit {
     val validators = signers.map(Address(_))
 
     val alloc = Map(miner.address -> miner.balance)
-    val extra = IstanbulExtra(validators, ByteVector.empty, List.empty)
+    val extra = IstanbulExtra(validators, ByteVector.empty, List.empty, false, None)
     val genesisConfig = GenesisConfig
       .generate(chainId, alloc)
-//      .copy(difficulty = BigInt(1),
-//            extraData = ByteVector.fill(Istanbul.extraVanity)(0.toByte) ++ RlpCodec.encode(extra).require.bytes)
-//    val genesisConfig =
-//      testReference.genesis.copy(
-//        alloc = alloc,
-//        extraData = ByteVector.fill(Istanbul.extraVanity)(0.toByte) ++ RlpCodec.encode(extra).require.bytes)
+      .copy(difficulty = BigInt(1),
+            extraData = RlpCodec.encode(extra).require.bytes)
 
     val sigHash = Istanbul.sigHash(genesisConfig.header)
     val seal    = sign(sigHash, miner.keyPair)
@@ -143,10 +141,10 @@ object testkit {
     val commitSeals = signers.map(pk => {
       sign(genesisConfig.header.hash ++ ByteVector(IstanbulMessage.msgCommitCode), pk)
     })
-    val newExtra = IstanbulExtra(validators, ByteVector(seal.bytes), commitSeals)
+    val newExtra = IstanbulExtra(validators, ByteVector(seal.bytes), commitSeals, false, None)
 
     val sealConfig = genesisConfig
-//      .copy(extraData = ByteVector.fill(Istanbul.extraVanity)(0.toByte) ++ RlpCodec.encode(newExtra).require.bytes)
+      .copy(extraData = RlpCodec.encode(newExtra).require.bytes)
 
     sealConfig
   }
