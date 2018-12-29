@@ -42,16 +42,16 @@ case class Istanbul[F[_]](
   def ecrecover(hash: ByteVector, sig: CryptoSignature): Option[KeyPair.Public] =
     Signature[ECDSA].recoverPublic(hash.kec256.toArray, sig, chainId)
 
-  def genesisSnapshot: F[Snapshot] =
-    ???
-//    log.trace(s"making a genesis snapshot")
-//    for {
-//      genesis <- history.genesisHeader
-//      extra = Istanbul.extractIstanbulExtra(genesis)
-//      snap  = Snapshot(config, 0, genesis.hash, ValidatorSet(extra.validators))
-//      _ <- Snapshot.storeSnapshot[F](snap, history.db, config.epoch)
-//      _ = log.trace(s"stored genesis with ${extra.validators.size} validators")
-//    } yield snap
+  def genesisSnapshot: F[Snapshot] = {
+    log.trace(s"making a genesis snapshot")
+    for {
+      genesis <- history.genesisHeader
+      extra = Istanbul.extractIstanbulExtra(genesis)
+      snap  = Snapshot(config, 0, genesis.hash, ValidatorSet(extra.validators))
+      _ <- Snapshot.storeSnapshot[F](snap, history.db, config.epoch)
+      _ = log.trace(s"stored genesis with ${extra.validators.size} validators")
+    } yield snap
+  }
 
   def applyHeaders(
       number: BigInt,
@@ -362,15 +362,13 @@ object Istanbul {
   case class IstanbulExtra(
       validators: List[Address],
       proposerSig: ByteVector,
-      committedSigs: List[CryptoSignature]
+      committedSigs: List[CryptoSignature],
+      authorize: Boolean,
+      candidate: Option[Address]
   ) extends Extra[IstanbulAlgo]
 
-  val extraVanity: Int          = 32 // Fixed number of extra-data bytes reserved for validator vanity
-  val extraSeal: Int            = 65 // Fixed number of extra-data bytes reserved for validator seal
-  val uncleHash: ByteVector     = RlpCodec.encode(()).require.bytes.kec256 // Always Keccak256(RLP([]))
-  val nonceAuthVote: ByteVector = hex"0xffffffffffffffff" // Magic nonce number to vote on adding a new signer
-  val nonceDropVote: ByteVector = hex"0x0000000000000000" // Magic nonce number to vote on removing a signer.
-  val mixDigest: ByteVector     = hex"0x63746963616c2062797a616e74696e65206661756c7420746f6c6572616e6365"
+  val extraSeal: Int        = 65 // Fixed number of extra-data bytes reserved for validator seal
+  val uncleHash: ByteVector = RlpCodec.encode(()).require.bytes.kec256 // Always Keccak256(RLP([]))
 
   def apply[F[_]](
       config: IstanbulConfig,
@@ -407,24 +405,23 @@ object Istanbul {
                       candidates)
 
   def extractIstanbulExtra(header: BlockHeader): IstanbulExtra =
-    ???
-//    RlpCodec.decode[IstanbulExtra](header.extraData.drop(Istanbul.extraVanity).bits).require.value
+    RlpCodec.decode[IstanbulExtra](header.extra.bits).require.value
 
   /**
     * set committedSeals and seal to empty
     * return new header
     */
-  def filteredHeader(header: BlockHeader, keepSeal: Boolean): BlockHeader =
-    ???
-//    val extra = extractIstanbulExtra(header)
-//    val newExtra = if (!keepSeal) {
-//      extra.copy(proposerSig = ByteVector.empty, committedSigs = List.empty)
-//    } else {
-//      extra.copy(committedSigs = List.empty)
-//    }
-//    val payload   = RlpCodec.encode(newExtra).require.bytes
-//    val newHeader = header.copy(extraData = ByteVector.fill(Istanbul.extraVanity)(0.toByte) ++ payload)
-//    newHeader
+  def filteredHeader(header: BlockHeader, keepSeal: Boolean): BlockHeader = {
+    val extra = extractIstanbulExtra(header)
+    val newExtra = if (!keepSeal) {
+      extra.copy(proposerSig = ByteVector.empty, committedSigs = List.empty)
+    } else {
+      extra.copy(committedSigs = List.empty)
+    }
+    val payload   = RlpCodec.encode(newExtra).require.bytes
+    val newHeader = header.copy(extra = payload)
+    newHeader
+  }
 
   /**
     * set committedSeals and seal to empty
@@ -434,13 +431,13 @@ object Istanbul {
     val newHeader = filteredHeader(header, false)
     RlpCodec.encode(newHeader).require.bytes
   }
-  def ecrecover(header: BlockHeader): Address =
+  def ecrecover(header: BlockHeader): Address = {
     // Retrieve the signature from the header extra-data
-    ???
-//    val signature = extractIstanbulExtra(header).proposerSig
-//    val hash      = sigHash(header).kec256
-//    val sig       = CryptoSignature(signature.toArray)
-//    val chainId   = ECDSAChainIdConvert.getChainId(sig.v)
-//    val public    = Signature[ECDSA].recoverPublic(hash.toArray, sig, chainId.get).get
-//    Address(public.bytes.kec256)
+    val signature = extractIstanbulExtra(header).proposerSig
+    val hash      = sigHash(header).kec256
+    val sig       = CryptoSignature(signature.toArray)
+    val chainId   = ECDSAChainIdConvert.getChainId(sig.v)
+    val public    = Signature[ECDSA].recoverPublic(hash.toArray, sig, chainId.get).get
+    Address(public.bytes.kec256)
+  }
 }

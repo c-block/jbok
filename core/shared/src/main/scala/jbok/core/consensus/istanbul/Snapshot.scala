@@ -168,8 +168,7 @@ object Snapshot {
 
   // create a new snapshot by applying a given header
   private def applyHeader[F[_]](snap: Snapshot, header: BlockHeader)(implicit F: Sync[F]): F[Snapshot] = F.delay {
-    val number      = header.number
-    val beneficiary = Address(header.beneficiary)
+    val number = header.number
 
     // Clear any stale votes at each epoch
     if (snap.number % snap.config.epoch == 0) {
@@ -184,7 +183,9 @@ object Snapshot {
     }
 
     // Tally up the new vote from the signer
-    val authorize = ???
+    val extra       = Istanbul.extractIstanbulExtra(header)
+    val beneficiary = extra.candidate
+    val authorize   = extra.authorize
 //      if (header.nonce == Istanbul.nonceAuthVote) {
 //      true
 //    } else if (header.nonce == Istanbul.nonceDropVote) {
@@ -195,51 +196,61 @@ object Snapshot {
 
     // Header authorized, discard any previous votes from the signer to prevent duplicated votes
     // Uncast the vote from the cached tally
-    snap.votes
-      .filter(x => x.signer == signer && x.address == beneficiary)
-      .foreach(v => snap.uncast(v.address, v.authorize))
-
-    // Uncast the vote from the chronological list
-    val votes = snap.votes.filterNot(x => x.signer == signer && x.address == beneficiary)
-
-    // Tally up the new vote from the signer
-    if (snap.cast(beneficiary, authorize)) {
-      votes += Vote(signer, number, beneficiary, authorize)
-    }
-
-    // If the vote passed, update the list of signers
-    val (newVotes, newValidators) = snap.tally.get(beneficiary) match {
-      case Some(t) if t.votes > snap.getValidators.size / 2 && t.authorize =>
-        val finalValidators = snap.validatorSet.validators :+ beneficiary
-
-        // Discard any previous votes around the just changed account
-        val finalVotes = votes.filter(_.address != beneficiary)
-        snap.tally -= beneficiary
-        (finalVotes, finalValidators)
-
-      case Some(t) if t.votes > snap.getValidators.size / 2 =>
-        val finalValidators = snap.validatorSet.validators.filterNot(_ == beneficiary)
-
-        // Discard any previous votes the deauthorized signer cast
-        votes
-          .filter(_.signer == beneficiary)
+    beneficiary match {
+      case Some(candidate) => {
+        snap.votes
+          .filter(x => x.signer == signer && x.address == candidate)
           .foreach(v => snap.uncast(v.address, v.authorize))
 
-        val newVotes = votes.filter(_.signer != beneficiary)
-        // Discard any previous votes around the just changed account
-        val finalVotes = newVotes.filter(_.address != beneficiary)
-        snap.tally -= beneficiary
-        (finalVotes, finalValidators)
+        // Uncast the vote from the chronological list
+        val votes = snap.votes.filterNot(x => x.signer == signer && x.address == candidate)
 
-      case _ =>
-        (votes, snap.validatorSet.validators)
+        // Tally up the new vote from the signer
+        if (snap.cast(candidate, authorize)) {
+          votes += Vote(signer, number, candidate, authorize)
+        }
+
+        // If the vote passed, update the list of signers
+        val (newVotes, newValidators) = snap.tally.get(candidate) match {
+          case Some(t) if t.votes > snap.getValidators.size / 2 && t.authorize =>
+            val finalValidators = snap.validatorSet.validators :+ candidate
+
+            // Discard any previous votes around the just changed account
+            val finalVotes = votes.filter(_.address != candidate)
+            snap.tally -= candidate
+            (finalVotes, finalValidators)
+
+          case Some(t) if t.votes > snap.getValidators.size / 2 =>
+            val finalValidators = snap.validatorSet.validators.filterNot(_ == candidate)
+
+            // Discard any previous votes the deauthorized signer cast
+            votes
+              .filter(_.signer == candidate)
+              .foreach(v => snap.uncast(v.address, v.authorize))
+
+            val newVotes = votes.filter(_.signer != candidate)
+            // Discard any previous votes around the just changed account
+            val finalVotes = newVotes.filter(_.address != candidate)
+            snap.tally -= candidate
+            (finalVotes, finalValidators)
+
+          case _ =>
+            (votes, snap.validatorSet.validators)
+        }
+
+        snap.copy(
+          number = snap.number + 1,
+          hash = header.hash,
+          votes = newVotes,
+          validatorSet = snap.validatorSet.copy(validators = newValidators)
+        )
+      }
+      case None =>
+        snap.copy(
+          number = snap.number + 1,
+          hash = header.hash
+        )
     }
 
-    snap.copy(
-      number = snap.number + 1,
-      hash = header.hash,
-      votes = newVotes,
-      validatorSet = snap.validatorSet.copy(validators = newValidators)
-    )
   }
 }
