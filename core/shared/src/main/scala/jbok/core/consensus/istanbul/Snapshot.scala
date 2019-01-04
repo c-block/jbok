@@ -159,9 +159,12 @@ object Snapshot {
     }
 
     // Resolve the authorization key and check against signers
-    val signer = Istanbul.ecrecover(header)
-    if (!snap.validatorSet.contains(signer)) {
-      throw new Exception("unauthorized signer")
+    val signer = Istanbul.ecrecover(header) match {
+      case None => throw new Exception("invalid signer")
+      case Some(s) =>
+        if (!snap.validatorSet.contains(s)) {
+          throw new Exception("unauthorized signer")
+        } else s
     }
 
     // Tally up the new vote from the signer

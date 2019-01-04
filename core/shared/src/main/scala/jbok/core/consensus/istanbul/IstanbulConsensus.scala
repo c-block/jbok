@@ -88,9 +88,12 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
 
   private def validateSigner(header: BlockHeader, snapshot: Snapshot): F[Unit] =
     for {
-      _      <- if (header.number == 0) F.raiseError(BlockNumberInvalid) else F.unit
-      signer <- F.delay(Istanbul.ecrecover(header))
-      _      <- if (snapshot.validatorSet.contains(signer)) F.unit else F.raiseError(SignerUnauthorizedInvalid)
+      _ <- if (header.number == 0) F.raiseError(BlockNumberInvalid) else F.unit
+      _ <- Istanbul.ecrecover(header) match {
+        case Some(signer) =>
+          if (snapshot.validatorSet.contains(signer)) F.unit else F.raiseError(SignerUnauthorizedInvalid)
+        case None => F.raiseError(SignerUnauthorizedInvalid)
+      }
     } yield ()
 
   override def verify(block: Block): F[Unit] =

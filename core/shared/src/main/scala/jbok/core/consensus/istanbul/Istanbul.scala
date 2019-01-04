@@ -83,7 +83,7 @@ final case class Istanbul[F[_]](
               // No explicit parents (or no more left), reach out to the database
               history.getBlockHeaderByHash(hash).flatMap {
                 case Some(header) => F.pure(header -> parents)
-                case None => ???
+                case None         => ???
               }
           }
           snap <- applyHeaders(number - 1, h.parentHash, p, h :: headers)
@@ -261,6 +261,10 @@ final case class Istanbul[F[_]](
       */
     for {
       lastProposal <- history.getBestBlock
+      lastProposer <- Istanbul.ecrecover(lastProposal.header) match {
+        case Some(s) => F.pure(s)
+        case None => F.raiseError[Address](new Exception("proposer not found"))
+      }
       context = currentContext
       roundChange  <- shouldChangeRound(lastProposal, round)
       currentState <- this.current.get
@@ -279,7 +283,7 @@ final case class Istanbul[F[_]](
 
       _ <- roundChanges.set(Map.empty)
       proposer <- validatorSet.get.flatMap(
-        _.calculateProposer(Istanbul.ecrecover(lastProposal.header), view.round, config.proposerPolicy) match {
+        _.calculateProposer(lastProposer, view.round, config.proposerPolicy) match {
           case Some(p) => F.pure[Address](p)
           case None    => F.raiseError[Address](new Exception("proposer not found"))
         })
@@ -435,13 +439,12 @@ object Istanbul {
     val newHeader = filteredHeader(header, false)
     RlpCodec.encode(newHeader).require.bytes
   }
-  def ecrecover(header: BlockHeader): Address = {
+  def ecrecover(header: BlockHeader): Option[Address] = {
     // Retrieve the signature from the header extra-data
     val signature = extractIstanbulExtra(header).proposerSig
     val hash      = sigHash(header).kec256
     val sig       = CryptoSignature(signature.toArray)
     val chainId   = ECDSAChainIdConvert.getChainId(sig.v)
-    val public    = Signature[ECDSA].recoverPublic(hash.toArray, sig, chainId.get).get
-    Address(public.bytes.kec256)
+    chainId.flatMap(Signature[ECDSA].recoverPublic(hash.toArray, sig, _).map(pub => Address(pub.bytes.kec256)))
   }
 }
