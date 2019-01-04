@@ -20,6 +20,7 @@ import jbok.crypto._
 import scala.util.Random
 
 object IstanbulInvalid {
+  case object ParentHashInvalid         extends Exception("ParentHashInvalid")
   case object TransactionRootInvalid    extends Exception("TransactionRootInvalid")
   case object OmmersHashInvalid         extends Exception("OmmersHashInvalid")
   case object BlockNumberInvalid        extends Exception("BlockNumberInvalid")
@@ -37,27 +38,23 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
 
   override type Protocol = IstanbulAlgo
 
-  override  val protocol: Protocol = IstanbulAlgo
+  override val protocol: Protocol = IstanbulAlgo
 
-  override  type E = IstanbulExtra
+  override type E = IstanbulExtra
 
-  private def validateExtra(header: BlockHeader, snapshot: Snapshot): F[IstanbulExtra] = ???
-//    for {
-//      _         <- if (header.extraData.length < Istanbul.extraVanity) F.raiseError(HeaderExtraInvalid) else F.unit
-//      extraData <- F.delay(Istanbul.extractIstanbulExtra(header))
-//      _         <- validateCommittedSeals(header, snapshot, extraData)
-//    } yield extraData
+  private def validateExtra(header: BlockHeader, snapshot: Snapshot): F[IstanbulExtra] =
+    for {
+      extraData <- F.delay(Istanbul.extractIstanbulExtra(header))
+      _         <- validateCommittedSeals(header, snapshot, extraData)
+    } yield extraData
 
   private def validateHeader(parentHeader: BlockHeader, header: BlockHeader): F[Unit] =
     for {
+      _ <- if (parentHeader.hash == header.parentHash) F.unit else F.raiseError(ParentHashInvalid)
       _ <- if (header.unixTimestamp > System.currentTimeMillis()) F.raiseError(BlockTimestampInvalid) else F.unit
       _ <- if (parentHeader.unixTimestamp + istanbul.config.period.toMillis > header.unixTimestamp)
         F.raiseError(BlockTimestampInvalid)
       else F.unit
-//      _ <- if (header.nonce != ByteVector.empty && header.nonce != Istanbul.nonceDropVote && header.nonce != Istanbul.nonceAuthVote)
-//        F.raiseError(HeaderNonceInvalid)
-//      else F.unit
-//      _ <- if (header.mixHash != Istanbul.mixDigest) F.raiseError(HeaderMixhashInvalid) else F.unit
       _ <- if (header.ommersHash == ByteVector.empty) F.unit else F.raiseError(OmmersHashInvalid)
       _ <- if (header.difficulty == istanbul.config.defaultDifficulty) F.unit else F.raiseError(DifficultyInvalid)
       _ <- if (header.number == 0) { F.unit } else {
@@ -91,13 +88,16 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
 
   private def validateSigner(header: BlockHeader, snapshot: Snapshot): F[Unit] =
     for {
-      _      <- if (header.number == 0) F.raiseError(BlockNumberInvalid) else F.unit
-      signer <- F.delay(Istanbul.ecrecover(header))
-      _      <- if (snapshot.validatorSet.contains(signer)) F.unit else F.raiseError(SignerUnauthorizedInvalid)
+      _ <- if (header.number == 0) F.raiseError(BlockNumberInvalid) else F.unit
+      _ <- Istanbul.ecrecover(header) match {
+        case Some(signer) =>
+          if (snapshot.validatorSet.contains(signer)) F.unit else F.raiseError(SignerUnauthorizedInvalid)
+        case None => F.raiseError(SignerUnauthorizedInvalid)
+      }
     } yield ()
 
   override def verify(block: Block): F[Unit] =
-    history.getBlockHeaderByHash(block.header.parentHash).flatMap {
+    history.getBlockHeaderByNumber(block.header.number - 1).flatMap {
       case Some(parentHeader) => validateHeader(parentHeader, block.header)
       case None               => F.raiseError(HeaderParentNotFoundInvalid)
     }
@@ -114,7 +114,10 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
       difficulty <- calcDifficulty(timestamp, parent.header)
       candidates <- istanbul.candidates.get
       candicate = Random.shuffle(candidates.toSeq).headOption
-      extraData = prepareExtra(snap)
+      extraData = candicate match {
+        case Some((c, auth)) => prepareExtra(snap, Option(c), auth)
+        case _               => prepareExtra(snap, None, false)
+      }
     } yield
       BlockHeader(
         parentHash = parent.header.hash,
@@ -132,13 +135,7 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
         gasLimit = calcGasLimit(parent.header.gasLimit),
         gasUsed = 0,
         unixTimestamp = timestamp,
-        extra = ByteVector.empty
-//        extraData = extraData,
-//        mixHash = Istanbul.mixDigest,
-//        nonce = candicate match {
-//          case Some((_, auth)) => if (auth) Istanbul.nonceAuthVote else Istanbul.nonceDropVote
-//          case None            => ByteVector.empty
-//        }
+        extra = extraData
       )
 
   private def calcGasLimit(parentGas: BigInt): BigInt = {
@@ -147,13 +144,15 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
     parentGas + gasLimitDifference - 1
   }
 
-  private def prepareExtra(snapshot: Snapshot): ByteVector = {
+  private def prepareExtra(snapshot: Snapshot, candidate: Option[Address], authorize: Boolean): ByteVector = {
     val extra = IstanbulExtra(
       validators = snapshot.getValidators,
       proposerSig = ByteVector.empty,
-      committedSigs = List.empty
+      committedSigs = List.empty,
+      authorize = authorize,
+      candidate = candidate
     )
-    ByteVector.fill(Istanbul.extraVanity)(0.toByte) ++ RlpCodec.encode(extra).require.bytes
+    RlpCodec.encode(extra).require.bytes
   }
 
   override def postProcess(executed: TypedBlock.ExecutedBlock[F]): F[TypedBlock.ExecutedBlock[F]] = F.pure(executed)
@@ -170,10 +169,13 @@ class IstanbulConsensus[F[_]](val blockPool: BlockPool[F], val istanbul: Istanbu
           for {
             sigHash <- F.delay(Istanbul.sigHash(executed.block.header))
             seal    <- istanbul.sign(sigHash)
-            extra = IstanbulExtra(snap.getValidators, ByteVector(seal.bytes), List.empty)
+            extra <- F.delay(
+              Istanbul
+                .extractIstanbulExtra(executed.block.header)
+                .copy(proposerSig = ByteVector(seal.bytes)))
             header = Istanbul
               .filteredHeader(executed.block.header, false)
-//              .copy(extraData = ByteVector.fill(Istanbul.extraVanity)(0.toByte) ++ RlpCodec.encode(extra).require.bytes)
+              .copy(extra = RlpCodec.encode(extra).require.bytes)
           } yield MinedBlock(executed.block.copy(header = header), executed.receipts)
         }
       } yield mined
