@@ -9,12 +9,12 @@ import cats.effect.{ExitCode, IO}
 import cats.implicits._
 import com.typesafe.config.Config
 import fs2._
-import jbok.app.api.SimulationAPI
+import jbok.app.api.{SimulationAPI, TestNetTxGen}
 import jbok.app.simulations.SimulationImpl
 import jbok.codec.rlp.implicits._
 import jbok.common.metrics.Metrics
 import jbok.core.config.Configs.FullNodeConfig
-import jbok.core.config.{TypeSafeConfigHelper, ConfigLoader, GenesisConfig}
+import jbok.core.config.{ConfigLoader, GenesisConfig, TypeSafeConfigHelper}
 import jbok.core.consensus.poa.clique.Clique
 import jbok.core.keystore.KeyStorePlatform
 import jbok.network.rpc.RpcServer
@@ -108,6 +108,12 @@ object MainApp extends StreamApp {
           _ = timer.sleep(5000.millis)
           ec <- runStream(server.stream)
         } yield ec
+
+      case "txgen" :: tail =>
+        for {
+          txtg <- TestNetTxGen()
+          ec   <- runStream(txtg.run)
+        } yield ExitCode.Success
 
       case _ =>
         for {
